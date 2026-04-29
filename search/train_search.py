@@ -1,6 +1,6 @@
+import os
 import sys
-# update your projecty root path before running
-sys.path.insert(0, '/path/to/nsga-net')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import os
 import numpy as np
@@ -25,7 +25,12 @@ from search import macro_encoding
 from misc.flops_counter import add_flops_counting_methods
 
 
-device = 'cuda'
+if torch.cuda.is_available():
+    device = 'cuda'
+elif getattr(torch.backends, 'mps', None) is not None and torch.backends.mps.is_available():
+    device = 'mps'
+else:
+    device = 'cpu'
 
 
 def main(genome, epochs, search_space='micro',
@@ -47,7 +52,7 @@ def main(genome, epochs, search_space='micro',
     learning_rate = 0.025
     momentum = 0.9
     weight_decay = 3e-4
-    data_root = '../data'
+    data_root = 'data'
     batch_size = 128
     cutout_length = 16
     auxiliary_weight = 0.4
@@ -75,11 +80,12 @@ def main(genome, epochs, search_space='micro',
     # logging.info("Genome = %s", genome)
     logging.info("Architecture = %s", genotype)
 
-    torch.cuda.set_device(gpu)
-    cudnn.benchmark = True
+    if device == 'cuda':
+        torch.cuda.set_device(gpu)
+        cudnn.benchmark = True
+        cudnn.enabled = True
+        torch.cuda.manual_seed(seed)
     torch.manual_seed(seed)
-    cudnn.enabled = True
-    torch.cuda.manual_seed(seed)
 
     n_params = (np.sum(np.prod(v.size()) for v in filter(lambda p: p.requires_grad, model.parameters())) / 1e6)
     model = model.to(device)
@@ -87,7 +93,7 @@ def main(genome, epochs, search_space='micro',
     logging.info("param size = %fMB", n_params)
 
     criterion = nn.CrossEntropyLoss()
-    criterion = criterion.cuda()
+    criterion = criterion.to(device)
 
     parameters = filter(lambda p: p.requires_grad, model.parameters())
     optimizer = torch.optim.SGD(

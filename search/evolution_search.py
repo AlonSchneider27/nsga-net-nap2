@@ -1,6 +1,6 @@
+import os
 import sys
-# update your projecty root path before running
-sys.path.insert(0, '/path/to/nsga-net')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import os
 import time
@@ -37,15 +37,10 @@ parser.add_argument('--layers', type=int, default=11, help='equivalent with N = 
 parser.add_argument('--epochs', type=int, default=25, help='# of epochs to train during architecture search')
 parser.add_argument('--output_dir', type=str, default='.', help='parent directory under which the experiment folder is created')
 args = parser.parse_args()
-args.save = os.path.join(args.output_dir, 'search-{}-{}-{}'.format(args.save, args.search_space, time.strftime("%Y%m%d-%H%M%S")))
-utils.create_exp_dir(args.save)
 
 log_format = '%(asctime)s %(message)s'
 logging.basicConfig(stream=sys.stdout, level=logging.INFO,
                     format=log_format, datefmt='%m/%d %I:%M:%S %p')
-fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
-fh.setFormatter(logging.Formatter(log_format))
-logging.getLogger().addHandler(fh)
 
 pop_hist = []  # keep track of every evaluated architecture
 
@@ -121,6 +116,12 @@ def do_every_generations(algorithm):
 
 
 def main():
+    args.save = os.path.join(args.output_dir, 'search-{}-{}-{}'.format(args.save, args.search_space, time.strftime("%Y%m%d-%H%M%S")))
+    utils.create_exp_dir(args.save)
+    fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
+    fh.setFormatter(logging.Formatter(log_format))
+    logging.getLogger().addHandler(fh)
+
     np.random.seed(args.seed)
     logging.info("args = %s", args)
 

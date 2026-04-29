@@ -222,4 +222,4 @@ class CIFAR10(data.Dataset):
 
 
 if __name__ == '__main__':
-    data = CIFAR10(root='../data', train=True, download=True)
+    data = CIFAR10(root='data', train=True, download=True)
