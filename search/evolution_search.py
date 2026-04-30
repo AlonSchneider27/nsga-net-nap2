@@ -36,7 +36,11 @@ parser.add_argument('--init_channels', type=int, default=24, help='# of filters 
 parser.add_argument('--layers', type=int, default=11, help='equivalent with N = 3')
 parser.add_argument('--epochs', type=int, default=25, help='# of epochs to train during architecture search')
 parser.add_argument('--output_dir', type=str, default='.', help='parent directory under which the experiment folder is created')
+parser.add_argument('--use_nap2', action='store_true', help='collect nap2 predicted accuracy alongside training (log-only, does not affect GA objectives)')
 args = parser.parse_args()
+
+# Hardcoded path to the nap2 predictor checkpoint directory (only used when --use_nap2 is set).
+NAP2_PREDICTOR_PATH = 'trained_models/cifar10/'
 
 log_format = '%(asctime)s %(message)s'
 logging.basicConfig(stream=sys.stdout, level=logging.INFO,
@@ -51,7 +55,7 @@ pop_hist = []  # keep track of every evaluated architecture
 class NAS(Problem):
     # first define the NAS problem (inherit from pymop)
     def __init__(self, search_space='micro', n_var=20, n_obj=1, n_constr=0, lb=None, ub=None,
-                 init_channels=24, layers=8, epochs=25, save_dir=None):
+                 init_channels=24, layers=8, epochs=25, save_dir=None, predictor=None):
         super().__init__(n_var=n_var, n_obj=n_obj, n_constr=n_constr, type_var=np.int)
         self.xl = lb
         self.xu = ub
@@ -60,6 +64,7 @@ class NAS(Problem):
         self._layers = layers
         self._epochs = epochs
         self._save_dir = save_dir
+        self._predictor = predictor
         self._n_evaluated = 0  # keep track of how many architectures are sampled
 
     def _evaluate(self, x, out, *args, **kwargs):
@@ -82,11 +87,16 @@ class NAS(Problem):
                                             layers=self._layers, cutout=False,
                                             epochs=self._epochs,
                                             save='arch_{}'.format(arch_id),
-                                            expr_root=self._save_dir)
+                                            expr_root=self._save_dir,
+                                            predictor=self._predictor)
 
             # all objectives assume to be MINIMIZED !!!!!
             objs[i, 0] = 100 - performance['valid_acc']
             objs[i, 1] = performance['flops']
+
+            pred_acc = performance.get('pred_acc')
+            pred_str = '{:.4f}'.format(pred_acc) if pred_acc is not None else 'n/a'
+            logging.info('arch %d: valid_acc=%.4f pred_acc=%s', arch_id, performance['valid_acc'], pred_str)
 
             self._n_evaluated += 1
 
@@ -125,6 +135,12 @@ def main():
     np.random.seed(args.seed)
     logging.info("args = %s", args)
 
+    predictor = None
+    if args.use_nap2:
+        from nap2 import NAP2Predictor
+        predictor = NAP2Predictor.load(NAP2_PREDICTOR_PATH)
+        logging.info("nap2 predictor loaded from %s", NAP2_PREDICTOR_PATH)
+
     # setup NAS search problem
     if args.search_space == 'micro':  # NASNet search space
         n_var = int(4 * args.n_blocks * 2)
@@ -148,7 +164,8 @@ def main():
     problem = NAS(n_var=n_var, search_space=args.search_space,
                   n_obj=2, n_constr=0, lb=lb, ub=ub,
                   init_channels=args.init_channels, layers=args.layers,
-                  epochs=args.epochs, save_dir=args.save)
+                  epochs=args.epochs, save_dir=args.save,
+                  predictor=predictor)
 
     # configure the nsga-net method
     method = engine.nsganet(pop_size=args.pop_size,
