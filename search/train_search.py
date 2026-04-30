@@ -35,7 +35,7 @@ else:
 
 def main(genome, epochs, search_space='micro',
          save='Design_1', expr_root='search', seed=0, gpu=0, init_channels=24,
-         layers=11, auxiliary=False, cutout=False, drop_path_prob=0.0):
+         layers=11, auxiliary=False, cutout=False, drop_path_prob=0.0, predictor=None):
 
     # ---- train logger ----------------- #
     save_pth = os.path.join(expr_root, '{}'.format(save))
@@ -141,6 +141,17 @@ def main(genome, epochs, search_space='micro',
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, int(epochs))
 
+    pred_acc = None
+    if predictor is not None:
+        try:
+            import copy
+            score_model = copy.deepcopy(model)
+            pred_acc = float(predictor.score(score_model, train_queue, steps=5))
+            logging.info('nap2 pred_acc = %.4f', pred_acc)
+            del score_model
+        except Exception as e:
+            logging.warning('nap2 prediction failed: %s', e)
+
     for epoch in range(epochs):
         scheduler.step()
         logging.info('epoch %d lr %e', epoch, scheduler.get_lr()[0])
@@ -176,6 +187,7 @@ def main(genome, epochs, search_space='micro',
         'valid_acc': valid_acc,
         'params': n_params,
         'flops': n_flops,
+        'pred_acc': pred_acc,
     }
 
 
