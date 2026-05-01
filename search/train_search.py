@@ -33,6 +33,25 @@ else:
     device = 'cpu'
 
 
+class _LogitsOnly(nn.Module):
+    """Adapter that exposes only the classification logits.
+
+    NetworkCIFAR.forward returns ``(logits, aux_logits)`` with logits first,
+    but nap2's _partial_train assumes the NAS-Bench-201 convention
+    ``(features, logits)`` and takes ``outputs[-1]`` (which is the unused
+    aux head, often None). Wrapping the model with this adapter normalizes
+    the output to a single logits tensor before nap2 sees it.
+    """
+
+    def __init__(self, m):
+        super().__init__()
+        self.inner = m
+
+    def forward(self, x):
+        out = self.inner(x)
+        return out[0] if isinstance(out, tuple) else out
+
+
 def main(genome, epochs, search_space='micro',
          save='Design_1', expr_root='search', seed=0, gpu=0, init_channels=24,
          layers=11, auxiliary=False, cutout=False, drop_path_prob=0.0, predictor=None):
@@ -145,12 +164,19 @@ def main(genome, epochs, search_space='micro',
     if predictor is not None:
         try:
             import copy
-            score_model = copy.deepcopy(model)
+            # nap2's pipeline is CPU-resident (AE is float64 on CPU, snapshots
+            # call .cpu().numpy()). Keep partial training on CPU too so dtypes
+            # and devices stay consistent across the whole score path.
+            score_model = copy.deepcopy(model).cpu()
+            # NetworkCIFAR.forward reads self.droprate; the training loop sets
+            # it per epoch but we score before training starts.
+            score_model.droprate = 0.0
+            score_model = _LogitsOnly(score_model)
             pred_acc = float(predictor.score(score_model, train_queue, steps=5))
             logging.info('nap2 pred_acc = %.4f', pred_acc)
             del score_model
-        except Exception as e:
-            logging.warning('nap2 prediction failed: %s', e)
+        except Exception:
+            logging.exception('nap2 prediction failed')
 
     for epoch in range(epochs):
         scheduler.step()

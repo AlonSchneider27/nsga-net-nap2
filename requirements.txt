@@ -11,5 +11,7 @@ numpy<1.24            # pymoo 0.3.0 uses np.float / np.int (removed in 1.24)
 graphviz>=0.20        # used by visualization/{macro,micro}_visualize.py
 
 # Performance predictor used in evolution_search when --use_nap2 is passed.
-# Replace <owner>/<rev> with the actual GitHub path and a pinned commit/tag.
-nap2 @ git+https://github.com/<owner>/nap2.git@<rev>
+# nap2 is vendored at ./NAPv2/ and installed editable, separately from this file:
+#     pip install -e ./NAPv2 --no-deps
+# --no-deps is intentional: nap2 declares numpy>=1.24, but pymoo 0.3.0 needs
+# numpy<1.24. nap2 imports fine on the older numpy in practice.
