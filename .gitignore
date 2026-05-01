@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 data/
 experiments/
+trained_models/
+.DS_Store
