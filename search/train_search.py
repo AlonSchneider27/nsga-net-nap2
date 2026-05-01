@@ -167,7 +167,13 @@ def main(genome, epochs, search_space='micro',
             # nap2's pipeline is CPU-resident (AE is float64 on CPU, snapshots
             # call .cpu().numpy()). Keep partial training on CPU too so dtypes
             # and devices stay consistent across the whole score path.
-            score_model = copy.deepcopy(model).cpu()
+            # Deepcopy so nap2's partial training (SGD steps, BN updates) doesn't
+            # leak into the model that's about to be trained. On MPS, fall back
+            # to CPU because nap2's float64 AE + MPS produces NNPack dtype
+            # mismatches; on CUDA/CPU, score on the same device as training.
+            score_model = copy.deepcopy(model)
+            if device == 'mps':
+                score_model = score_model.cpu()
             # NetworkCIFAR.forward reads self.droprate; the training loop sets
             # it per epoch but we score before training starts.
             score_model.droprate = 0.0

@@ -235,6 +235,10 @@ class NAP2Predictor:
         total_batches = steps * interval
         batch_count = 0
         data_iter = iter(dataloader)
+        try:
+            model_device = next(model.parameters()).device
+        except StopIteration:
+            model_device = torch.device("cpu")
 
         while batch_count < total_batches:
             try:
@@ -242,6 +246,9 @@ class NAP2Predictor:
             except StopIteration:
                 data_iter = iter(dataloader)
                 inputs, targets = next(data_iter)
+
+            inputs = inputs.to(model_device, non_blocking=True)
+            targets = targets.to(model_device, non_blocking=True)
 
             optimizer.zero_grad()
             outputs = model(inputs)
