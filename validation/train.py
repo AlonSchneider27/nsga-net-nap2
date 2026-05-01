@@ -20,6 +20,7 @@ import argparse
 import numpy as np
 
 from misc import utils
+from misc.dataset_configs import get_config, build_search_transforms
 
 # model imports
 from models import macro_genotypes
@@ -52,6 +53,9 @@ parser.add_argument('--filter_increment', default=4, type=int, help='# of filter
 parser.add_argument('--SE', action='store_true', default=False, help='use Squeeze-and-Excitation')
 parser.add_argument('--net_type', type=str, default='micro', help='(options)micro, macro')
 parser.add_argument('--output_dir', type=str, default='.', help='parent directory under which the experiment folder is created')
+parser.add_argument('--dataset', type=str, default='cifar10',
+                    choices=['cifar10', 'cifar100', 'ImageNet16-120'],
+                    help='dataset to retrain the discovered architecture on')
 args = parser.parse_args()
 
 args.save = os.path.join(args.output_dir, 'train-{}-{}'.format(args.save, time.strftime("%Y%m%d-%H%M%S")))
@@ -87,9 +91,24 @@ def main():
     best_acc = 0  # initiate a artificial best accuracy so far
 
     # Data
-    train_transform, valid_transform = utils._data_transforms_cifar10(args)
-    train_data = torchvision.datasets.CIFAR10(root=args.data, train=True, download=True, transform=train_transform)
-    valid_data = torchvision.datasets.CIFAR10(root=args.data, train=False, download=True, transform=valid_transform)
+    cfg = get_config(args.dataset)
+    data_root = args.data if args.data != 'data' else cfg['data_dir']
+    train_transform = build_search_transforms(cfg, train=True)
+    if args.cutout:
+        insert_at = -1 if cfg['mean'] is not None else len(train_transform.transforms)
+        train_transform.transforms.insert(insert_at, utils.Cutout(args.cutout_length))
+    valid_transform = build_search_transforms(cfg, train=False)
+
+    if args.dataset == 'cifar10':
+        DatasetCls = torchvision.datasets.CIFAR10
+    elif args.dataset == 'cifar100':
+        DatasetCls = torchvision.datasets.CIFAR100
+    else:
+        from search.imagenet16_search import ImageNet16
+        DatasetCls = ImageNet16
+
+    train_data = DatasetCls(root=data_root, train=True, download=True, transform=train_transform)
+    valid_data = DatasetCls(root=data_root, train=False, download=True, transform=valid_transform)
 
     train_queue = torch.utils.data.DataLoader(
         train_data, batch_size=args.batch_size, shuffle=True, pin_memory=True, num_workers=2)
@@ -100,16 +119,18 @@ def main():
     # classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
 
     # Model
+    num_classes = cfg['num_classes']
+    image_size = cfg['image_size']
     if args.net_type == 'micro':
         logging.info("==> Building micro search space encoded architectures")
         genotype = eval("genotypes.%s" % args.arch)
-        net = PyrmNASNet(args.init_channels, num_classes=10, layers=args.layers,
+        net = PyrmNASNet(args.init_channels, num_classes=num_classes, layers=args.layers,
                          auxiliary=args.auxiliary, genotype=genotype,
                          increment=args.filter_increment, SE=args.SE)
     elif args.net_type == 'macro':
         genome = eval("macro_genotypes.%s" % args.arch)
         channels = [(3, 128), (128, 128), (128, 128)]
-        net = EvoNetwork(genome, channels, 10, (32, 32), decoder='dense')
+        net = EvoNetwork(genome, channels, num_classes, image_size, decoder='dense')
     else:
         raise NameError('Unknown network type, please only use supported network type')
 

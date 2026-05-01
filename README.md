@@ -13,6 +13,94 @@ Code accompanying the paper. All codes assume running from root directory. Pleas
 Python >= 3.6.8, PyTorch >= 1.0.1.post2, torchvision >= 0.2.2, pymoo == 0.3.0
 ```
 
+## Datasets
+
+The search and validation phases support three datasets via the `--dataset` flag:
+
+| Dataset | Classes | Image | Default data dir | Auto-download |
+|---|---|---|---|---|
+| `cifar10` (default) | 10 | 32×32 | `data/` | yes (cs.toronto.edu) |
+| `cifar100` | 100 | 32×32 | `data/` | yes (cs.toronto.edu) |
+| `ImageNet16-120` | 120 | 16×16 | `data/ImageNet16-120/` | yes if `IMAGENET16_URL` is set |
+
+Expected data layout under the project root:
+
+```
+data/cifar-10-batches-py/                     (auto-downloaded)
+data/cifar-100-python/                        (auto-downloaded)
+data/ImageNet16-120/{x_train,y_train,x_val,y_val}.npy
+```
+
+ImageNet16-120 has no canonical public URL. Override the download mirror with the `IMAGENET16_URL` env var, or paste a working URL into `DEFAULT_URL` at the top of [search/imagenet16_search.py](search/imagenet16_search.py). If both auto-download and cache miss, the loader raises `FileNotFoundError` naming the exact paths and the URL it tried.
+
+### Search-phase flags
+
+| Flag | Values | Default | Notes |
+|---|---|---|---|
+| `--dataset` | `cifar10` \| `cifar100` \| `ImageNet16-120` | `cifar10` | Selects classes, normalization, image size, and loader. |
+| `--use_nap2` | (store_true) | off | Collect nap2 predicted accuracy alongside training (logged, doesn't change GA objectives). |
+| `--search_space` | `micro` \| `macro` | `micro` | Architecture-search grammar. |
+| `--init_channels` | int | `24` | Stem channel width. |
+| `--layers` | int | `11` | Number of cells. |
+| `--epochs` | int | `25` | Proxy training length per architecture. |
+| `--pop_size` | int | `40` | NSGA-II population. |
+| `--n_offspring` | int | `40` | Offspring per generation. |
+| `--n_gens` | int | `50` | Generations. |
+| `--output_dir` | path | `.` | Parent dir under which run folders are created. |
+
+### Examples
+
+CIFAR-10 with nap2 (regression check):
+
+```bash
+python search/evolution_search.py \
+  --search_space micro --init_channels 16 --layers 8 \
+  --epochs 20 --pop_size 40 --n_offspring 20 --n_gens 30 \
+  --output_dir experiments/cifar10 \
+  --use_nap2
+```
+
+CIFAR-100 with nap2 (matches the dataset our nap2 checkpoint was trained on):
+
+```bash
+python search/evolution_search.py \
+  --dataset cifar100 \
+  --search_space micro --init_channels 16 --layers 8 \
+  --epochs 20 --pop_size 40 --n_offspring 20 --n_gens 30 \
+  --output_dir experiments/cifar100 \
+  --use_nap2
+```
+
+ImageNet16-120 (first run downloads the dataset; subsequent runs use cache):
+
+```bash
+IMAGENET16_URL=https://your-mirror.example/ImageNet16-120.tar.gz \
+python search/evolution_search.py \
+  --dataset ImageNet16-120 \
+  --search_space micro --init_channels 16 --layers 8 \
+  --epochs 20 --pop_size 40 --n_offspring 20 --n_gens 30 \
+  --output_dir experiments/imagenet16
+```
+
+Quick smoke test (any dataset — replace `--dataset`):
+
+```bash
+python search/evolution_search.py \
+  --dataset cifar100 \
+  --search_space micro --init_channels 16 --layers 8 \
+  --epochs 1 --pop_size 2 --n_offspring 2 --n_gens 1 \
+  --output_dir experiments/smoke
+```
+
+Validation phase (full retraining of a discovered architecture, requires CUDA):
+
+```bash
+python validation/train.py \
+  --dataset cifar100 \
+  --arch NSGANet --layers 20 --init_channels 34 \
+  --auxiliary --cutout --batch_size 96 --epochs 600
+```
+
 ## Results on CIFAR-10
 ![cifar10_pareto](https://github.com/ianwhale/nsga-net/blob/master/img/cifar10.png  "cifar10")
 

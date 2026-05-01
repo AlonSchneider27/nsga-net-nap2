@@ -16,10 +16,9 @@ import torchvision.transforms as transforms
 from models.macro_models import EvoNetwork
 from models.micro_models import NetworkCIFAR as Network
 
-import search.cifar10_search as my_cifar10
-
 import time
 from misc import utils
+from misc.dataset_configs import get_config, get_loader_class, build_search_transforms
 from search import micro_encoding
 from search import macro_encoding
 from misc.flops_counter import add_flops_counting_methods
@@ -54,7 +53,8 @@ class _LogitsOnly(nn.Module):
 
 def main(genome, epochs, search_space='micro',
          save='Design_1', expr_root='search', seed=0, gpu=0, init_channels=24,
-         layers=11, auxiliary=False, cutout=False, drop_path_prob=0.0, predictor=None):
+         layers=11, auxiliary=False, cutout=False, drop_path_prob=0.0, predictor=None,
+         dataset='cifar10'):
 
     # ---- train logger ----------------- #
     save_pth = os.path.join(expr_root, '{}'.format(save))
@@ -66,12 +66,16 @@ def main(genome, epochs, search_space='micro',
     # fh.setFormatter(logging.Formatter(log_format))
     # logging.getLogger().addHandler(fh)
 
+    # ---- dataset config -------------- #
+    cfg = get_config(dataset)
+    num_classes = cfg['num_classes']
+    data_root = cfg['data_dir']
+    image_size = cfg['image_size']
+
     # ---- parameter values setting ----- #
-    CIFAR_CLASSES = 10
     learning_rate = 0.025
     momentum = 0.9
     weight_decay = 3e-4
-    data_root = 'data'
     batch_size = 128
     cutout_length = 16
     auxiliary_weight = 0.4
@@ -86,13 +90,13 @@ def main(genome, epochs, search_space='micro',
 
     if search_space == 'micro':
         genotype = micro_encoding.decode(genome)
-        model = Network(init_channels, CIFAR_CLASSES, layers, auxiliary, genotype)
+        model = Network(init_channels, num_classes, layers, auxiliary, genotype)
     elif search_space == 'macro':
         genotype = macro_encoding.decode(genome)
         channels = [(3, init_channels),
                     (init_channels, 2*init_channels),
                     (2*init_channels, 4*init_channels)]
-        model = EvoNetwork(genotype, channels, CIFAR_CLASSES, (32, 32), decoder='residual')
+        model = EvoNetwork(genotype, channels, num_classes, image_size, decoder='residual')
     else:
         raise NameError('Unknown search space type')
 
@@ -122,27 +126,17 @@ def main(genome, epochs, search_space='micro',
         weight_decay=weight_decay
     )
 
-    CIFAR_MEAN = [0.49139968, 0.48215827, 0.44653124]
-    CIFAR_STD = [0.24703233, 0.24348505, 0.26158768]
-
-    train_transform = transforms.Compose([
-        transforms.RandomCrop(32, padding=4),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor()
-    ])
-
+    train_transform = build_search_transforms(cfg, train=True)
     if cutout:
-        train_transform.transforms.append(utils.Cutout(cutout_length))
+        # Insert Cutout right before Normalize (or last for unnormalized datasets).
+        insert_at = -1 if cfg['mean'] is not None else len(train_transform.transforms)
+        train_transform.transforms.insert(insert_at, utils.Cutout(cutout_length))
 
-    train_transform.transforms.append(transforms.Normalize(CIFAR_MEAN, CIFAR_STD))
+    valid_transform = build_search_transforms(cfg, train=False)
 
-    valid_transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(CIFAR_MEAN, CIFAR_STD),
-    ])
-
-    train_data = my_cifar10.CIFAR10(root=data_root, train=True, download=True, transform=train_transform)
-    valid_data = my_cifar10.CIFAR10(root=data_root, train=False, download=True, transform=valid_transform)
+    DatasetCls = get_loader_class(dataset)
+    train_data = DatasetCls(root=data_root, train=True, download=True, transform=train_transform)
+    valid_data = DatasetCls(root=data_root, train=False, download=True, transform=valid_transform)
 
     # num_train = len(train_data)
     # indices = list(range(num_train))
