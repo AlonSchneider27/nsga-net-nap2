@@ -83,11 +83,17 @@ class Cell(nn.Module):
 class AuxiliaryHeadCIFAR(nn.Module):
 
     def __init__(self, C, num_classes):
-        """assuming input size 8x8"""
+        """Reduces any input spatial size down to a fixed 2x2, then to logits.
+
+        The original implementation hardcoded ``AvgPool2d(5, stride=3)`` which
+        assumes an 8x8 input (CIFAR-10/100 with --layers 8). Switching to an
+        adaptive pool makes this head work on smaller spatials too, e.g. the
+        4x4 maps that arise when training on ImageNet16-120 (16x16 input).
+        """
         super(AuxiliaryHeadCIFAR, self).__init__()
         self.features = nn.Sequential(
             nn.ReLU(inplace=True),
-            nn.AvgPool2d(5, stride=3, padding=0, count_include_pad=False),  # image size = 2 x 2
+            nn.AdaptiveAvgPool2d((2, 2)),  # always 2 x 2 regardless of input size
             nn.Conv2d(C, 128, 1, bias=False),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
@@ -268,7 +274,10 @@ class NetworkImageNet(nn.Module):
 
         if auxiliary:
             self.auxiliary_head = AuxiliaryHeadImageNet(C_to_auxiliary, num_classes)
-        self.global_pooling = nn.AvgPool2d(7)
+        # Adaptive pool collapses any final spatial size to 1x1, matching what
+        # NetworkCIFAR already does. The legacy ``AvgPool2d(7)`` only worked on
+        # 224x224 inputs and broke on 16x16 / 32x32.
+        self.global_pooling = nn.AdaptiveAvgPool2d(1)
         self.classifier = nn.Linear(C_prev, num_classes)
 
     def forward(self, input):

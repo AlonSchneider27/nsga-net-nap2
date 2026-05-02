@@ -37,6 +37,9 @@ parser.add_argument('--layers', type=int, default=11, help='equivalent with N = 
 parser.add_argument('--epochs', type=int, default=25, help='# of epochs to train during architecture search')
 parser.add_argument('--output_dir', type=str, default='.', help='parent directory under which the experiment folder is created')
 parser.add_argument('--use_nap2', action='store_true', help='collect nap2 predicted accuracy alongside training (log-only, does not affect GA objectives)')
+parser.add_argument('--dataset', type=str, default='cifar10',
+                    choices=['cifar10', 'cifar100', 'ImageNet16-120'],
+                    help='dataset for the search-phase proxy training')
 args = parser.parse_args()
 
 # Hardcoded path to the nap2 predictor checkpoint directory (only used when --use_nap2 is set).
@@ -55,7 +58,8 @@ pop_hist = []  # keep track of every evaluated architecture
 class NAS(Problem):
     # first define the NAS problem (inherit from pymop)
     def __init__(self, search_space='micro', n_var=20, n_obj=1, n_constr=0, lb=None, ub=None,
-                 init_channels=24, layers=8, epochs=25, save_dir=None, predictor=None):
+                 init_channels=24, layers=8, epochs=25, save_dir=None, predictor=None,
+                 dataset='cifar10'):
         super().__init__(n_var=n_var, n_obj=n_obj, n_constr=n_constr, type_var=np.int)
         self.xl = lb
         self.xu = ub
@@ -65,6 +69,7 @@ class NAS(Problem):
         self._epochs = epochs
         self._save_dir = save_dir
         self._predictor = predictor
+        self._dataset = dataset
         self._n_evaluated = 0  # keep track of how many architectures are sampled
 
     def _evaluate(self, x, out, *args, **kwargs):
@@ -88,7 +93,8 @@ class NAS(Problem):
                                             epochs=self._epochs,
                                             save='arch_{}'.format(arch_id),
                                             expr_root=self._save_dir,
-                                            predictor=self._predictor)
+                                            predictor=self._predictor,
+                                            dataset=self._dataset)
 
             # all objectives assume to be MINIMIZED !!!!!
             objs[i, 0] = 100 - performance['valid_acc']
@@ -126,7 +132,7 @@ def do_every_generations(algorithm):
 
 
 def main():
-    args.save = os.path.join(args.output_dir, 'search-{}-{}-{}'.format(args.save, args.search_space, time.strftime("%Y%m%d-%H%M%S")))
+    args.save = os.path.join(args.output_dir, 'search-{}-{}-{}-{}'.format(args.save, args.search_space, args.dataset, time.strftime("%Y%m%d-%H%M%S")))
     utils.create_exp_dir(args.save)
     fh = logging.FileHandler(os.path.join(args.save, 'log.txt'))
     fh.setFormatter(logging.Formatter(log_format))
@@ -165,7 +171,7 @@ def main():
                   n_obj=2, n_constr=0, lb=lb, ub=ub,
                   init_channels=args.init_channels, layers=args.layers,
                   epochs=args.epochs, save_dir=args.save,
-                  predictor=predictor)
+                  predictor=predictor, dataset=args.dataset)
 
     # configure the nsga-net method
     method = engine.nsganet(pop_size=args.pop_size,
