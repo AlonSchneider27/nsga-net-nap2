@@ -17,6 +17,21 @@ from search import nsganet as engine
 from pymop.problem import Problem
 from pymoo.optimize import minimize
 
+
+# ----------------------------------------------------------------
+# nap2 predictor checkpoint paths — paste here OR override via CLI.
+# CLI flags (--nap2_ae_weights_pt, etc.) take precedence over these.
+# Required when --use_nap2 is set; ignored otherwise. The two AE
+# JSONs are optional (defaults are used if empty); the four .pt
+# paths and the predictor JSON are required.
+# ----------------------------------------------------------------
+NAP2_AE_WEIGHTS_PT     = ''
+NAP2_AE_WEIGHTS_JSON   = ''   # AE hyperparams; carries 'layers_shapes' and (optional) 'normalize'
+NAP2_AE_GRADIENTS_PT   = ''
+NAP2_AE_GRADIENTS_JSON = ''   # same, for the gradients AE
+NAP2_LSTM_PT           = ''
+NAP2_LSTM_JSON         = ''   # predictor hyperparams; carries 'predictor_type' (lstm|bigru)
+
 parser = argparse.ArgumentParser("Multi-objetive Genetic Algorithm for NAS")
 parser.add_argument('--save', type=str, default='GA-BiObj', help='experiment name')
 parser.add_argument('--seed', type=int, default=0, help='random seed')
@@ -40,10 +55,21 @@ parser.add_argument('--use_nap2', action='store_true', help='collect nap2 predic
 parser.add_argument('--dataset', type=str, default='cifar10',
                     choices=['cifar10', 'cifar100', 'ImageNet16-120'],
                     help='dataset for the search-phase proxy training')
+# nap2 checkpoint paths — each defaults to '' so we can detect whether the
+# user supplied them. They override the matching module-level NAP2_* constant.
+parser.add_argument('--nap2_ae_weights_pt', type=str, default='',
+                    help='path to the AE-weights .pt checkpoint (required with --use_nap2)')
+parser.add_argument('--nap2_ae_weights_json', type=str, default='',
+                    help='path to the AE-weights JSON hyperparams (optional; uses defaults if empty)')
+parser.add_argument('--nap2_ae_gradients_pt', type=str, default='',
+                    help='path to the AE-gradients .pt checkpoint (required with --use_nap2)')
+parser.add_argument('--nap2_ae_gradients_json', type=str, default='',
+                    help='path to the AE-gradients JSON hyperparams (optional; uses defaults if empty)')
+parser.add_argument('--nap2_lstm_pt', type=str, default='',
+                    help='path to the predictor (LSTM or BiGRU) .pt checkpoint (required with --use_nap2)')
+parser.add_argument('--nap2_lstm_json', type=str, default='',
+                    help='path to the predictor JSON hyperparams; predictor_type detected from this file (required with --use_nap2)')
 args = parser.parse_args()
-
-# Hardcoded path to the nap2 predictor checkpoint directory (only used when --use_nap2 is set).
-NAP2_PREDICTOR_PATH = 'trained_models/cifar10/'
 
 log_format = '%(asctime)s %(message)s'
 logging.basicConfig(stream=sys.stdout, level=logging.INFO,
@@ -131,6 +157,73 @@ def do_every_generations(algorithm):
                                                   np.median(pop_obj[:, 1]), np.max(pop_obj[:, 1])))
 
 
+# ---------------------------------------------------------------------------------------------------------
+# nap2 predictor loading: resolve per-file paths (CLI > module constant) and
+# build a NAP2Predictor by direct construction. Bypasses NAP2Predictor.load(),
+# which insists on a fixed sub-tree layout — too rigid for our use case where
+# checkpoint filenames vary.
+# ---------------------------------------------------------------------------------------------------------
+def _resolve_nap2_paths(args):
+    """Return resolved nap2 checkpoint paths.
+
+    CLI flag overrides take precedence over the module-level NAP2_* constants.
+    The four .pt paths and the predictor JSON are required; the two AE JSONs
+    are optional (loader falls back to defaults when empty).
+    """
+    paths = {
+        'ae_weights_pt':     args.nap2_ae_weights_pt     or NAP2_AE_WEIGHTS_PT,
+        'ae_weights_json':   args.nap2_ae_weights_json   or NAP2_AE_WEIGHTS_JSON,
+        'ae_gradients_pt':   args.nap2_ae_gradients_pt   or NAP2_AE_GRADIENTS_PT,
+        'ae_gradients_json': args.nap2_ae_gradients_json or NAP2_AE_GRADIENTS_JSON,
+        'lstm_pt':           args.nap2_lstm_pt           or NAP2_LSTM_PT,
+        'lstm_json':         args.nap2_lstm_json         or NAP2_LSTM_JSON,
+    }
+    required = ('ae_weights_pt', 'ae_gradients_pt', 'lstm_pt', 'lstm_json')
+    missing = [k for k in required if not paths[k]]
+    if missing:
+        flags = ', '.join('--nap2_' + k for k in missing)
+        raise ValueError(
+            "--use_nap2 requires the following paths (set the matching "
+            "NAP2_* constants at the top of search/evolution_search.py "
+            "or pass {}).".format(flags)
+        )
+    return paths
+
+
+def _load_nap2_predictor(paths):
+    """Build a NAP2Predictor from explicit per-file paths.
+
+    Mirrors NAP2Predictor.load()'s behavior (auto-detects predictor type
+    and normalization) but without enforcing a directory layout.
+    """
+    import json
+    from nap2 import NAP2Predictor
+    from nap2.autoencoder import FeatureMapAutoEncoder
+    from nap2.lstm_predictor import LSTMPredictor
+    from nap2.bigru_predictor import BiGRUDualPredictor
+
+    normalize = 'none'
+    if paths['ae_weights_json']:
+        with open(paths['ae_weights_json']) as f:
+            normalize = json.load(f).get('normalize', 'none')
+
+    with open(paths['lstm_json']) as f:
+        predictor_type = json.load(f).get('predictor_type', 'lstm')
+
+    ae_w = FeatureMapAutoEncoder.load(
+        model_path=paths['ae_weights_pt'],
+        params_path=paths['ae_weights_json'] or None,
+    )
+    ae_g = FeatureMapAutoEncoder.load(
+        model_path=paths['ae_gradients_pt'],
+        params_path=paths['ae_gradients_json'] or None,
+    )
+    PredictorCls = BiGRUDualPredictor if predictor_type == 'bigru' else LSTMPredictor
+    pred = PredictorCls.load(model_path=paths['lstm_pt'], params_path=paths['lstm_json'])
+
+    return NAP2Predictor(ae_weights=ae_w, ae_gradients=ae_g, lstm=pred, normalize=normalize)
+
+
 def main():
     args.save = os.path.join(args.output_dir, 'search-{}-{}-{}-{}'.format(args.save, args.search_space, args.dataset, time.strftime("%Y%m%d-%H%M%S")))
     utils.create_exp_dir(args.save)
@@ -143,9 +236,10 @@ def main():
 
     predictor = None
     if args.use_nap2:
-        from nap2 import NAP2Predictor
-        predictor = NAP2Predictor.load(NAP2_PREDICTOR_PATH)
-        logging.info("nap2 predictor loaded from %s", NAP2_PREDICTOR_PATH)
+        paths = _resolve_nap2_paths(args)
+        predictor = _load_nap2_predictor(paths)
+        logging.info("nap2 predictor loaded (lstm=%s, ae_w=%s, ae_g=%s)",
+                     paths['lstm_pt'], paths['ae_weights_pt'], paths['ae_gradients_pt'])
 
     # setup NAS search problem
     if args.search_space == 'micro':  # NASNet search space

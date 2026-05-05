@@ -101,6 +101,32 @@ python validation/train.py \
   --auxiliary --cutout --batch_size 96 --epochs 600
 ```
 
+### nap2 predictor checkpoints
+
+When `--use_nap2` is set, the search loads three model files (`.pt`) plus their hyperparameter JSONs. The six paths are configurable in two ways, with CLI taking precedence:
+
+1. **Paste into the constants** at the top of [search/evolution_search.py](search/evolution_search.py): `NAP2_AE_WEIGHTS_PT`, `NAP2_AE_WEIGHTS_JSON`, `NAP2_AE_GRADIENTS_PT`, `NAP2_AE_GRADIENTS_JSON`, `NAP2_LSTM_PT`, `NAP2_LSTM_JSON`.
+2. **Pass via CLI flags**: `--nap2_ae_weights_pt`, `--nap2_ae_weights_json`, `--nap2_ae_gradients_pt`, `--nap2_ae_gradients_json`, `--nap2_lstm_pt`, `--nap2_lstm_json`.
+
+The four `.pt` paths and the predictor JSON are required. The two AE JSONs are optional — leave them empty to use the autoencoder's default architecture. Predictor type (LSTM vs BiGRU) and normalization mode are auto-detected from the supplied JSON files.
+
+Example with explicit per-file paths:
+
+```bash
+python search/evolution_search.py --use_nap2 \
+  --search_space micro --init_channels 16 --layers 8 \
+  --epochs 20 --pop_size 40 --n_offspring 20 --n_gens 30 \
+  --output_dir experiments/cifar10 \
+  --nap2_ae_weights_pt     trained_models/cifar10/ae/weights/ae_weights.pt \
+  --nap2_ae_weights_json   trained_models/cifar10/ae/weights/aew_model_hyper_params.json \
+  --nap2_ae_gradients_pt   trained_models/cifar10/ae/gradients/ae_gradients.pt \
+  --nap2_ae_gradients_json trained_models/cifar10/ae/gradients/aeg_model_hyper_params.json \
+  --nap2_lstm_pt           trained_models/cifar10/lstm/cp/model_state_cp/lstm_reg_final.pt \
+  --nap2_lstm_json         trained_models/cifar10/lstm/lstm_model_hyper_params.json
+```
+
+Without `--use_nap2`, all six paths are ignored — the search runs without the predictor.
+
 ## Results on CIFAR-10
 ![cifar10_pareto](https://github.com/ianwhale/nsga-net/blob/master/img/cifar10.png  "cifar10")
 
