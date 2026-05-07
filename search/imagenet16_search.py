@@ -2,20 +2,29 @@
 
 NB201's downsampled ImageNet variant: 16x16 RGB images, 120 classes, ~151k
 train + ~6k val. Distributed by the NB201 paper authors as a tarball
-containing four .npy files: ``x_train.npy``, ``y_train.npy``, ``x_val.npy``,
-``y_val.npy``.
+containing eleven Python pickle files: ``train_data_batch_1`` through
+``train_data_batch_10`` (sharded train set) plus ``val_data`` (the full
+validation set). Each pickle is a dict like::
+
+    {'data': numpy.ndarray of shape (N, 3*16*16) uint8,
+     'labels': list[int]}                # 1-indexed in the canonical dist
+
+We concatenate the train shards and remap labels to 0..119 to match
+PyTorch CrossEntropy's expectations (and what xautodl's reference loader
+does).
 
 Auto-download flow mirrors search/cifar10_search.py:
-    - If the .npy files already exist under ``root``, load them.
+    - If the eleven batch files already exist under ``root``, load them.
     - Otherwise, fetch a tarball from ``IMAGENET16_URL`` (constant below;
       override via the ``IMAGENET16_URL`` env var) and extract.
     - On total failure, raise FileNotFoundError naming both the expected
       paths and the URL that was attempted, with manual-download instructions.
 
-Default mirror is left blank because ImageNet16-120 has no canonical public
-URL — pick a working mirror (HuggingFace dataset, GitHub release, etc.) and
-either set the ``IMAGENET16_URL`` env var or paste it into ``DEFAULT_URL``
-below.
+------------------------------------------------------------------
+HARDCODE YOUR DATASET PATH HERE if you don't want to set --data:
+edit DEFAULT_ROOT below or the matching DATASET_CONFIGS entry in
+misc/dataset_configs.py.
+------------------------------------------------------------------
 """
 
 from __future__ import print_function
@@ -24,15 +33,19 @@ import errno
 import hashlib
 import os
 import os.path
+import pickle
 import sys
 import tarfile
 
 import numpy as np
-import torch
 import torch.utils.data as data
-import torchvision.transforms as T
 from PIL import Image
 
+
+# Paste your absolute path here if it's not the default. The config
+# registry in misc/dataset_configs.py reads this constant so the change
+# propagates to evolution_search.py / validation/{train,test}.py.
+DEFAULT_ROOT: str = 'data/ImageNet16'
 
 # Override at runtime via the IMAGENET16_URL env var, or edit this default.
 DEFAULT_URL: str = ''
@@ -41,7 +54,9 @@ DEFAULT_URL: str = ''
 # integrity check (download still verified by file existence only).
 DEFAULT_MD5: str = ''
 
-EXPECTED_FILES = ('x_train.npy', 'y_train.npy', 'x_val.npy', 'y_val.npy')
+TRAIN_BATCHES = tuple(f'train_data_batch_{i}' for i in range(1, 11))
+VAL_FILE = 'val_data'
+EXPECTED_FILES = TRAIN_BATCHES + (VAL_FILE,)
 
 
 def _check_md5(fpath: str, expected_md5: str) -> bool:
@@ -91,28 +106,49 @@ def _all_files_present(root: str) -> bool:
 
 
 def _missing_files_error(root: str, url: str) -> FileNotFoundError:
-    expected = '\n  '.join(os.path.join(root, n) for n in EXPECTED_FILES)
+    expected_lines = [os.path.join(root, n) for n in EXPECTED_FILES]
+    expected = '\n  '.join(expected_lines)
     msg = (
-        'ImageNet16-120 data files not found. Expected:\n  '
+        'ImageNet16-120 data files not found. Expected the eleven NB201\n'
+        'batch files:\n  '
         f'{expected}\n'
         f"\nDownload was attempted from: {url or '(no URL configured)'}\n"
         '\nTo fix:\n'
         '  1. Set the IMAGENET16_URL env var to a working mirror, or paste\n'
         '     a URL into DEFAULT_URL in search/imagenet16_search.py.\n'
-        '  2. Or download the tarball manually and extract the four .npy\n'
+        '  2. Or download the tarball manually and extract the eleven batch\n'
         f'     files into {root}/.\n'
+        '  3. Or hardcode your absolute path by editing DEFAULT_ROOT in\n'
+        '     search/imagenet16_search.py (and the matching data_dir in\n'
+        '     misc/dataset_configs.py).\n'
         '\nThe NB201 ImageNet16-120 dataset is distributed via the original\n'
         'NB201 paper authors (https://github.com/D-X-Y/AutoDL-Projects).\n'
     )
     return FileNotFoundError(msg)
 
 
+def _load_nb201_pickle(path: str):
+    """Load one NB201 batch pickle.
+
+    Returns:
+        data: ndarray (N, 3*16*16) uint8
+        labels: list[int]; remapped from the canonical 1..120 to 0..119
+    """
+    with open(path, 'rb') as f:
+        entry = pickle.load(f, encoding='latin1')
+    raw = entry['data']                            # (N, 3*16*16) uint8
+    labels = [int(y) - 1 for y in entry['labels']]
+    return raw, labels
+
+
 class ImageNet16(data.Dataset):
     """NB201 ImageNet16-120: 16x16 RGB, 120 classes.
 
     Args:
-        root: directory containing (or that will receive) the four .npy files.
-        train: True -> x_train.npy/y_train.npy; False -> x_val.npy/y_val.npy.
+        root: directory containing (or that will receive) the eleven
+            NB201 batch files. Defaults to ``DEFAULT_ROOT``.
+        train: True -> ``train_data_batch_1..10``;
+            False -> ``val_data``.
         transform/target_transform: callables applied to image / label.
         download: if True and files are missing, fetch a tarball from
             ``IMAGENET16_URL`` env var or ``DEFAULT_URL``.
@@ -120,10 +156,12 @@ class ImageNet16(data.Dataset):
         md5: optional MD5 to verify the tarball.
     """
 
-    def __init__(self, root, train=True,
+    def __init__(self, root=None, train=True,
                  transform=None, target_transform=None,
                  download=False,
                  url: str = '', md5: str = ''):
+        if root is None:
+            root = DEFAULT_ROOT
         self.root = os.path.expanduser(root)
         self.transform = transform
         self.target_transform = target_transform
@@ -145,24 +183,25 @@ class ImageNet16(data.Dataset):
         if not _all_files_present(self.root):
             raise _missing_files_error(self.root, resolved_url)
 
-        suffix = 'train' if self.train else 'val'
-        x = np.load(os.path.join(self.root, f'x_{suffix}.npy'))
-        y = np.load(os.path.join(self.root, f'y_{suffix}.npy'))
+        # ---- load the NB201 pickle batches -----------------------------
+        if self.train:
+            chunks = []
+            labels = []
+            for name in TRAIN_BATCHES:
+                d, y = _load_nb201_pickle(os.path.join(self.root, name))
+                chunks.append(d)
+                labels.extend(y)
+            x = np.concatenate(chunks, axis=0)
+        else:
+            x, labels = _load_nb201_pickle(os.path.join(self.root, VAL_FILE))
 
-        # Some distributions store x as float32 in [0,1] CHW; some store uint8
-        # HWC. Coerce to uint8 HWC so downstream PIL conversion works.
-        if x.dtype != np.uint8:
-            x_min, x_max = float(x.min()), float(x.max())
-            if x_max <= 1.0 + 1e-6:
-                x = (x * 255.0).clip(0, 255).astype(np.uint8)
-            else:
-                x = x.clip(0, 255).astype(np.uint8)
-        if x.ndim == 4 and x.shape[1] == 3 and x.shape[-1] != 3:
-            # CHW -> HWC
-            x = np.transpose(x, (0, 2, 3, 1))
+        # NB201 ships uint8 (N, 768). Reshape to (N, 3, 16, 16) and
+        # transpose to HWC for PIL.Image.fromarray.
+        n = x.shape[0]
+        x = x.reshape(n, 3, 16, 16).transpose(0, 2, 3, 1).astype(np.uint8)
 
         self._data = x
-        self._labels = np.asarray(y).astype(np.int64).tolist()
+        self._labels = labels
 
     def __getitem__(self, index):
         img, target = self._data[index], self._labels[index]
@@ -196,5 +235,5 @@ class ImageNet16(data.Dataset):
 
 
 if __name__ == '__main__':
-    ds = ImageNet16(root='data/ImageNet16-120', train=True, download=True)
+    ds = ImageNet16(root=DEFAULT_ROOT, train=True, download=True)
     print(ds)

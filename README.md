@@ -21,17 +21,24 @@ The search and validation phases support three datasets via the `--dataset` flag
 |---|---|---|---|---|
 | `cifar10` (default) | 10 | 32×32 | `data/` | yes (cs.toronto.edu) |
 | `cifar100` | 100 | 32×32 | `data/` | yes (cs.toronto.edu) |
-| `ImageNet16-120` | 120 | 16×16 | `data/ImageNet16-120/` | yes if `IMAGENET16_URL` is set |
+| `ImageNet16-120` | 120 | 16×16 | `data/ImageNet16/` | yes if `IMAGENET16_URL` is set |
 
 Expected data layout under the project root:
 
 ```
 data/cifar-10-batches-py/                     (auto-downloaded)
 data/cifar-100-python/                        (auto-downloaded)
-data/ImageNet16-120/{x_train,y_train,x_val,y_val}.npy
+data/ImageNet16/                  (canonical NB201 layout)
+  ├── train_data_batch_1
+  ├── train_data_batch_2
+  ├── ...
+  ├── train_data_batch_10
+  └── val_data
 ```
 
 ImageNet16-120 has no canonical public URL. Override the download mirror with the `IMAGENET16_URL` env var, or paste a working URL into `DEFAULT_URL` at the top of [search/imagenet16_search.py](search/imagenet16_search.py). If both auto-download and cache miss, the loader raises `FileNotFoundError` naming the exact paths and the URL it tried.
+
+To hardcode an absolute data path (e.g. on a Slurm cluster), edit either `DEFAULT_ROOT` at the top of [search/imagenet16_search.py](search/imagenet16_search.py) or the `data_dir` field for `ImageNet16-120` in [misc/dataset_configs.py](misc/dataset_configs.py).
 
 ### Search-phase flags
 
