@@ -37,7 +37,11 @@ DATASET_CONFIGS: Dict[str, Dict[str, Any]] = {
         'image_size': (16, 16),
         'mean': None,   # NB201 protocol: no normalization
         'std':  None,
-        'data_dir': 'data/ImageNet16-120',
+        # Default folder name matches the user's layout (`ImageNet16/`,
+        # not `ImageNet16-120/`). Edit this string if your data lives
+        # elsewhere — e.g. an absolute path on a Slurm cluster — or
+        # change DEFAULT_ROOT in search/imagenet16_search.py.
+        'data_dir': 'data/ImageNet16',
         'loader_module': 'search.imagenet16_search',
         'loader_class': 'ImageNet16',
     },
