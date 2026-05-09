@@ -109,7 +109,21 @@ def extract_layer_stats(
     dict
         Flat dict, e.g. {"mean": scalar, "mean_axis_-1": array, ...}.
     """
+    if tensor is None:
+        # Defensive: extract_all_stats already filters None tensors, but a
+        # direct caller could still hit this. A clear domain error beats a
+        # confusing ``np.isinf`` TypeError on an object-dtype array.
+        raise ValueError(
+            "extract_layer_stats: tensor is None (no gradient captured for "
+            "this layer)"
+        )
+
     data = np.asarray(tensor)
+    if data.dtype == object:
+        raise ValueError(
+            f"extract_layer_stats: object-dtype array (shape={data.shape}); "
+            "pass a numeric ndarray"
+        )
 
     # Replace Inf with NaN before computation.
     data = np.where(np.isinf(data), np.nan, data)
@@ -145,6 +159,15 @@ def extract_all_stats(
     for step_idx, layers in snapshots.items():
         result[step_idx] = {}
         for layer_name, tensor in layers.items():
+            # Skip layers whose gradient was never captured. SnapshotCollector
+            # stores Python ``None`` for any Conv2d/Linear whose
+            # ``module.weight.grad`` is None — common in NAS architectures
+            # where some sub-graphs receive no gradient flow (heavy
+            # pool/skip cells with narrow concat sets). Forwarding ``None``
+            # to extract_layer_stats produces an object-dtype array and
+            # ``np.isinf`` fails on it.
+            if tensor is None:
+                continue
             result[step_idx][layer_name] = extract_layer_stats(
                 tensor, stat_names=stat_names
             )
