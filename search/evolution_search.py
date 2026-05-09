@@ -282,6 +282,19 @@ def main():
                    callback=do_every_generations,
                    termination=('n_gen', args.n_gens))
 
+    # Write a per-architecture summary.json next to log.txt at run end.
+    # Wrapped in try/except so a scrape failure can never invalidate the
+    # search results that just finished.
+    try:
+        from misc.log_summary import write_summary
+        log_path = os.path.join(args.save, 'log.txt')
+        summary_path = os.path.join(args.save, 'summary.json')
+        data = write_summary(log_path, summary_path)
+        logging.info('summary written to %s (%d architectures)',
+                     summary_path, len(data))
+    except Exception:
+        logging.exception('summary generation failed')
+
     return
 
 
