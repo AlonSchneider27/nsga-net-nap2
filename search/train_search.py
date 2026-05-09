@@ -54,7 +54,7 @@ class _LogitsOnly(nn.Module):
 def main(genome, epochs, search_space='micro',
          save='Design_1', expr_root='search', seed=0, gpu=0, init_channels=24,
          layers=11, auxiliary=False, cutout=False, drop_path_prob=0.0, predictor=None,
-         dataset='cifar10'):
+         dataset='cifar10', nap2_steps=5):
 
     # ---- train logger ----------------- #
     save_pth = os.path.join(expr_root, '{}'.format(save))
@@ -172,8 +172,8 @@ def main(genome, epochs, search_space='micro',
             # it per epoch but we score before training starts.
             score_model.droprate = 0.0
             score_model = _LogitsOnly(score_model)
-            pred_acc = float(predictor.score(score_model, train_queue, steps=5))
-            logging.info('nap2 pred_acc = %.4f', pred_acc)
+            pred_acc = float(predictor.score(score_model, train_queue, steps=nap2_steps))
+            logging.info('nap2 pred_acc = %.4f (steps=%d)', pred_acc, nap2_steps)
             del score_model
         except Exception:
             logging.exception('nap2 prediction failed')

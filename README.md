@@ -39,6 +39,7 @@ ImageNet16-120 has no canonical public URL. Override the download mirror with th
 |---|---|---|---|
 | `--dataset` | `cifar10` \| `cifar100` \| `ImageNet16-120` | `cifar10` | Selects classes, normalization, image size, and loader. |
 | `--use_nap2` | (store_true) | off | Collect nap2 predicted accuracy alongside training (logged, doesn't change GA objectives). |
+| `--nap2_steps` | int | `5` | Number of snapshots nap2 collects per architecture; each costs ~100 mini-batches of partial training. Lower = faster, less stable; higher = slower, more accurate. |
 | `--search_space` | `micro` \| `macro` | `micro` | Architecture-search grammar. |
 | `--init_channels` | int | `24` | Stem channel width. |
 | `--layers` | int | `11` | Number of cells. |
