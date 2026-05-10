@@ -17,7 +17,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 
-from misc.log_summary import resolve_log_path, scrape, write_summary
+from misc.log_summary import (
+    compute_run_metrics,
+    resolve_log_path,
+    scrape,
+    write_summary,
+)
 
 
 # Shaped after a real log line. Timestamp prefix kept because the regexes
@@ -108,10 +113,85 @@ def test_scrape_genotype_is_verbatim(sample_log):
 
 def test_write_summary_round_trip(sample_log, tmp_path):
     out = tmp_path / "summary.json"
-    data = write_summary(sample_log, out)
+    payload = write_summary(sample_log, out)
     on_disk = json.loads(out.read_text())
-    assert on_disk == data
-    assert on_disk["2"]["pred_acc"] is None  # JSON null
+    assert on_disk == payload
+    # Top-level shape is the documented {architectures, metrics} envelope.
+    assert set(on_disk) == {"architectures", "metrics"}
+    assert on_disk["architectures"]["2"]["pred_acc"] is None  # JSON null
+    # Metrics block exists with the documented keys (or an "error" key
+    # if compute failed). Values themselves checked elsewhere.
+    metrics = on_disk["metrics"]
+    if "error" not in metrics:
+        for key in ("kendall_tau", "spearman_rho", "top_10pct_accuracy",
+                    "num_architectures", "num_failed_predictions"):
+            assert key in metrics
+
+
+def test_compute_run_metrics_happy_path():
+    """Two-or-more paired observations -> real KT/Spearman values."""
+    archs = {
+        "1": {"valid_acc": 50.0, "pred_acc": 0.30},
+        "2": {"valid_acc": 60.0, "pred_acc": 0.40},
+        "3": {"valid_acc": 70.0, "pred_acc": 0.50},
+        "4": {"valid_acc": 80.0, "pred_acc": 0.60},
+    }
+    m = compute_run_metrics(archs)
+    # Perfect rank correlation -> KT and Spearman both == 1.0.
+    assert m["kendall_tau"] == pytest.approx(1.0)
+    assert m["spearman_rho"] == pytest.approx(1.0)
+    assert m["num_architectures"] == 4
+    assert m["num_failed_predictions"] == 0
+
+
+def test_compute_run_metrics_excludes_failed_predictions():
+    """pred_acc=None archs are tallied but excluded from correlation."""
+    archs = {
+        "1": {"valid_acc": 50.0, "pred_acc": 0.30},
+        "2": {"valid_acc": 60.0, "pred_acc": None},     # failed predictor
+        "3": {"valid_acc": 70.0, "pred_acc": 0.50},
+        "4": {"valid_acc": 80.0, "pred_acc": None},     # failed predictor
+        "5": {"valid_acc": 90.0, "pred_acc": 0.70},
+    }
+    m = compute_run_metrics(archs)
+    assert m["num_failed_predictions"] == 2
+    assert m["num_architectures"] == 3   # only the 3 with both signals
+
+
+def test_compute_run_metrics_too_few_paired_returns_nulls():
+    """Below 2 paired observations, correlations are null (not NaN)."""
+    archs = {
+        "1": {"valid_acc": 50.0, "pred_acc": None},
+        "2": {"valid_acc": 60.0, "pred_acc": 0.40},   # only 1 paired
+    }
+    m = compute_run_metrics(archs)
+    assert m["kendall_tau"] is None
+    assert m["spearman_rho"] is None
+    assert m["top_10pct_accuracy"] is None
+    assert m["num_architectures"] == 1
+    assert m["num_failed_predictions"] == 1
+
+
+def test_compute_run_metrics_all_failed_returns_nulls():
+    archs = {
+        "1": {"valid_acc": 50.0, "pred_acc": None},
+        "2": {"valid_acc": 60.0, "pred_acc": None},
+    }
+    m = compute_run_metrics(archs)
+    assert m["kendall_tau"] is None
+    assert m["num_architectures"] == 0
+    assert m["num_failed_predictions"] == 2
+
+
+def test_write_summary_metrics_in_payload(sample_log, tmp_path):
+    """End-to-end: metrics block populated from the fixture log."""
+    out = tmp_path / "summary.json"
+    payload = write_summary(sample_log, out)
+    metrics = payload["metrics"]
+    assert "error" not in metrics
+    # Fixture has 3 archs; arch 2 has pred_acc=n/a -> 2 paired observations.
+    assert metrics["num_architectures"] == 2
+    assert metrics["num_failed_predictions"] == 1
 
 
 def test_resolve_log_path_directory(sample_log):
