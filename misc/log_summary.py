@@ -20,6 +20,16 @@ This module reads such a log and emits a dict mapping arch id (str) to::
         "genotype":       str,             # verbatim Genotype(...) repr
     }
 
+``write_summary`` additionally computes a top-level rollup of ranking
+metrics (Kendall tau, Spearman rho, top-10% overlap) between
+predicted and observed accuracy across all architectures with both
+signals, and packages the result as::
+
+    {
+        "architectures": {arch_id: {...}, ...},
+        "metrics":       {kendall_tau, spearman_rho, ...},
+    }
+
 The scraper is the importable core; ``scripts/summarize_search.py`` is a
 thin CLI on top.
 """
@@ -28,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from pathlib import Path
 from typing import Dict, Optional, Union
@@ -130,19 +141,100 @@ def scrape(log_path: Union[str, Path]) -> Dict[str, Dict]:
     return {k: results[k] for k in sorted(results, key=int)}
 
 
+def compute_run_metrics(architectures: Dict[str, Dict]) -> Dict[str, object]:
+    """Compute ranking metrics over a scraped architectures dict.
+
+    Calls into :func:`nap2.training.evaluate.compute_metrics` over the
+    architectures that have **both** ``valid_acc`` and a non-None
+    ``pred_acc``. Architectures with ``pred_acc=None`` (predictor
+    failures) are tallied in ``num_failed_predictions`` and excluded
+    from the correlation.
+
+    Returns a dict with keys ``kendall_tau``, ``spearman_rho``,
+    ``top_10pct_accuracy``, ``num_architectures``,
+    ``num_failed_predictions``. The first three are floats, or
+    ``None`` if there are fewer than 2 paired observations (not enough
+    for a correlation) or if the scipy result is NaN. JSON-serializable.
+    """
+    n_failed = sum(
+        1 for v in architectures.values() if v.get("pred_acc") is None
+    )
+
+    predicted = {
+        k: v["pred_acc"]
+        for k, v in architectures.items()
+        if v.get("pred_acc") is not None and v.get("valid_acc") is not None
+    }
+    ground_truth = {
+        k: v["valid_acc"]
+        for k, v in architectures.items()
+        if v.get("valid_acc") is not None
+    }
+
+    n_paired = len(set(predicted) & set(ground_truth))
+    if n_paired < 2:
+        return {
+            "kendall_tau": None,
+            "spearman_rho": None,
+            "top_10pct_accuracy": None,
+            "num_architectures": n_paired,
+            "num_failed_predictions": n_failed,
+        }
+
+    # Lazy import so log_summary stays usable in environments where
+    # nap2 isn't importable (e.g. the scraper-only CLI).
+    from nap2.training.evaluate import compute_metrics
+
+    raw = compute_metrics(predicted, ground_truth)
+
+    def _clean(x):
+        # scipy returns NaN when one side is constant; JSON can't
+        # encode NaN portably, so coerce to None.
+        if isinstance(x, float) and math.isnan(x):
+            return None
+        return x
+
+    return {
+        "kendall_tau": _clean(raw.get("kendall_tau")),
+        "spearman_rho": _clean(raw.get("spearman_rho")),
+        "top_10pct_accuracy": _clean(raw.get("top_10pct_accuracy")),
+        "num_architectures": int(raw.get("num_architectures", n_paired)),
+        "num_failed_predictions": n_failed,
+    }
+
+
 def write_summary(
     log_path: Union[str, Path],
     output_path: Union[str, Path],
-) -> Dict[str, Dict]:
-    """Scrape ``log_path`` and write the result as JSON to ``output_path``.
+) -> Dict[str, object]:
+    """Scrape ``log_path`` and write a JSON summary to ``output_path``.
 
-    Returns the scraped dict so callers can act on it without re-reading
+    The on-disk shape is::
+
+        {
+            "architectures": {arch_id: {...}, ...},
+            "metrics":       {kendall_tau, spearman_rho, ...}
+        }
+
+    Returns the same dict so callers can act on it without re-reading
     the file. ``output_path``'s parent directory must already exist.
+
+    If metrics computation fails for any reason (e.g. nap2 import
+    error in a stripped-down env), the metrics block is replaced with
+    ``{"error": "<message>"}`` so the architectures payload still
+    gets written.
     """
-    data = scrape(log_path)
+    architectures = scrape(log_path)
+    try:
+        metrics = compute_run_metrics(architectures)
+    except Exception as e:
+        logging.exception("compute_run_metrics failed; emitting error in summary")
+        metrics = {"error": f"{type(e).__name__}: {e}"}
+
+    payload = {"architectures": architectures, "metrics": metrics}
     with Path(output_path).open("w") as f:
-        json.dump(data, f, indent=2)
-    return data
+        json.dump(payload, f, indent=2)
+    return payload
 
 
 def resolve_log_path(input_path: Union[str, Path]) -> Path:

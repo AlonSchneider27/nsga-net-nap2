@@ -17,7 +17,6 @@ Usage from project root::
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -25,7 +24,7 @@ from pathlib import Path
 # Allow running from anywhere; project root holds the misc package.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from misc.log_summary import resolve_log_path, scrape
+from misc.log_summary import resolve_log_path, write_summary
 
 
 def main() -> int:
@@ -57,17 +56,16 @@ def main() -> int:
     else:
         output = args.output
 
-    data = scrape(log_path)
+    payload = write_summary(log_path, output)
+    architectures = payload["architectures"]
+    metrics = payload["metrics"]
 
-    with output.open("w") as f:
-        json.dump(data, f, indent=2)
+    n_failed = sum(1 for v in architectures.values() if v["pred_acc"] is None)
+    n_missing_flops = sum(1 for v in architectures.values() if v["flops"] is None)
+    n_missing_param = sum(1 for v in architectures.values() if v["param_size_mb"] is None)
+    n_missing_geno = sum(1 for v in architectures.values() if v["genotype"] is None)
 
-    n_failed = sum(1 for v in data.values() if v["pred_acc"] is None)
-    n_missing_flops = sum(1 for v in data.values() if v["flops"] is None)
-    n_missing_param = sum(1 for v in data.values() if v["param_size_mb"] is None)
-    n_missing_geno = sum(1 for v in data.values() if v["genotype"] is None)
-
-    print(f"Wrote {len(data)} architectures to {output}")
+    print(f"Wrote {len(architectures)} architectures to {output}")
     if n_failed:
         print(f"  - {n_failed} arch(s) had pred_acc=n/a (predictor failed)")
     if n_missing_flops:
@@ -76,6 +74,23 @@ def main() -> int:
         print(f"  warning: {n_missing_param} arch(s) missing param_size_mb")
     if n_missing_geno:
         print(f"  warning: {n_missing_geno} arch(s) missing genotype")
+
+    print()
+    print("Ranking metrics (predicted vs valid_acc):")
+    if "error" in metrics:
+        print(f"  error: {metrics['error']}")
+    elif metrics.get("num_architectures", 0) < 2:
+        print(f"  not enough paired observations to compute correlation "
+              f"(num_architectures={metrics.get('num_architectures', 0)})")
+    else:
+        kt = metrics["kendall_tau"]
+        sr = metrics["spearman_rho"]
+        top = metrics["top_10pct_accuracy"]
+        print(f"  kendall_tau         = {kt:.4f}" if kt is not None else "  kendall_tau         = null")
+        print(f"  spearman_rho        = {sr:.4f}" if sr is not None else "  spearman_rho        = null")
+        print(f"  top_10pct_accuracy  = {top:.4f}" if top is not None else "  top_10pct_accuracy  = null")
+        print(f"  num_architectures   = {metrics['num_architectures']}")
+        print(f"  num_failed_predictions = {metrics['num_failed_predictions']}")
     return 0
 
 
