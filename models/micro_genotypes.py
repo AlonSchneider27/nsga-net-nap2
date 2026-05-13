@@ -155,4 +155,23 @@ NSGANet = Genotype(
 )
 
 
+# NAS-Bench-201 ----------------------------------------------------------
+# NB201 cells: 4 nodes, 6 directed edges (edges to node 1, 2, 3 with
+# 1+2+3=6 op slots). Each edge picks one of these 5 primitives. The
+# design space is 5**6 = 15,625 architectures, exactly matching the
+# published NB201 catalog — every architecture the GA can sample is a
+# known NB201 entry, so the user can cross-reference summary.json
+# offline against the NB201 catalog without any API installation.
+#
+# See nap2/search_spaces/nb201_ops.py for the actual op implementations.
+NB201_PRIMITIVES = [
+    'none',
+    'skip_connect',
+    'nor_conv_1x1',
+    'nor_conv_3x3',
+    'avg_pool_3x3',
+]
 
+# Single-field container so summary.json / logs see a clean arch_str.
+# Round-trippable via nap2.search_spaces.nb201_ops.parse_arch_str.
+NB201Genotype = namedtuple('NB201Genotype', 'arch_str')

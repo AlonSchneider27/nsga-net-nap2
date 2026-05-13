@@ -51,6 +51,27 @@ class _LogitsOnly(nn.Module):
         return out[0] if isinstance(out, tuple) else out
 
 
+class _LogitsFirstFromNB201(nn.Module):
+    """Adapter that flips NB201's (features, logits) to (logits, None).
+
+    NSGA-Net's train()/infer() unpack as ``outputs, outputs_aux = net(inputs)``
+    and pass ``outputs`` into the loss. NetworkCIFAR returns (logits, aux),
+    but NB201's TinyNetwork returns (features, logits) — the opposite
+    convention. Without this adapter, train() would compute the loss on
+    features, not logits.
+    """
+
+    def __init__(self, m):
+        super().__init__()
+        self.inner = m
+
+    def forward(self, x):
+        out = self.inner(x)
+        # NB201 always returns a 2-tuple (features, logits); take logits.
+        features, logits = out
+        return logits, None
+
+
 def main(genome, epochs, search_space='micro',
          save='Design_1', expr_root='search', seed=0, gpu=0, init_channels=24,
          layers=11, auxiliary=False, cutout=False, drop_path_prob=0.0, predictor=None,
@@ -97,6 +118,25 @@ def main(genome, epochs, search_space='micro',
                     (init_channels, 2*init_channels),
                     (2*init_channels, 4*init_channels)]
         model = EvoNetwork(genotype, channels, num_classes, image_size, decoder='residual')
+    elif search_space == 'nb201':
+        # NAS-Bench-201 5-op DAG cells. Reuses nap2's TinyNetwork builder
+        # (single Conv2d stem, works on both 32x32 and 16x16 inputs).
+        from search import nb201_encoding
+        from nap2.search_spaces.nb201_ops import build_nb201_model
+        genotype = nb201_encoding.decode(genome)
+        # NB201 has 3 stages; --layers maps to the total number of cells,
+        # so cells-per-stage = layers // 3. Floor of 1 keeps tiny smoke
+        # runs (e.g. --layers 2) from collapsing.
+        n_cells_per_stage = max(layers // 3, 1)
+        model = build_nb201_model(
+            genotype.arch_str,
+            num_classes=num_classes,
+            C=init_channels,
+            N=n_cells_per_stage,
+        )
+        # NB201 returns (features, logits); NSGA-Net's train/infer want
+        # (logits, aux). Flip via adapter so the search loop is uniform.
+        model = _LogitsFirstFromNB201(model)
     else:
         raise NameError('Unknown search space type')
 
@@ -193,7 +233,9 @@ def main(genome, epochs, search_space='micro',
     model = add_flops_counting_methods(model)
     model.eval()
     model.start_flops_count()
-    random_data = torch.randn(1, 3, 32, 32)
+    # Use the dataset's true image size so flops are correct on 16x16
+    # ImageNet16-120 (was previously hardcoded to 32x32).
+    random_data = torch.randn(1, 3, *image_size)
     model(torch.autograd.Variable(random_data).to(device))
     n_flops = np.round(model.compute_average_flops_cost() / 1e6, 4)
     logging.info('flops = %f', n_flops)

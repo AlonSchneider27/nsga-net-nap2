@@ -12,6 +12,8 @@ import numpy as np
 from search import train_search
 from search import micro_encoding
 from search import macro_encoding
+from search import nb201_encoding
+from models.micro_genotypes import NB201_PRIMITIVES
 from search import nsganet as engine
 
 from pymop.problem import Problem
@@ -35,7 +37,10 @@ NAP2_LSTM_JSON         = ''   # predictor hyperparams; carries 'predictor_type' 
 parser = argparse.ArgumentParser("Multi-objetive Genetic Algorithm for NAS")
 parser.add_argument('--save', type=str, default='GA-BiObj', help='experiment name')
 parser.add_argument('--seed', type=int, default=0, help='random seed')
-parser.add_argument('--search_space', type=str, default='micro', help='macro or micro search space')
+parser.add_argument('--search_space', type=str, default='micro',
+                    choices=['micro', 'macro', 'nb201'],
+                    help='search space: micro (DARTS-style cells), macro (GeneticCNN-style), '
+                         'or nb201 (NAS-Bench-201 5-op DAG cells)')
 # arguments for micro search space
 parser.add_argument('--n_blocks', type=int, default=5, help='number of blocks in a cell')
 parser.add_argument('--n_ops', type=int, default=9, help='number of operations considered')
@@ -115,6 +120,8 @@ class NAS(Problem):
                 genome = micro_encoding.convert(x[i, :])
             elif self._search_space == 'macro':
                 genome = macro_encoding.convert(x[i, :])
+            elif self._search_space == 'nb201':
+                genome = nb201_encoding.convert(x[i, :])
             performance = train_search.main(genome=genome,
                                             search_space=self._search_space,
                                             init_channels=self._init_channels,
@@ -262,6 +269,13 @@ def main():
         n_var = int(((args.n_nodes-1)*args.n_nodes/2 + 1)*3)
         lb = np.zeros(n_var)
         ub = np.ones(n_var)
+    elif args.search_space == 'nb201':   # NAS-Bench-201 5-op DAG cells
+        # 6 edges, each picking one of len(NB201_PRIMITIVES) ops.
+        # Total design space: len(NB201_PRIMITIVES)**6 = 5**6 = 15_625,
+        # which equals the published NB201 catalog.
+        n_var = nb201_encoding.N_EDGES
+        lb = np.zeros(n_var)
+        ub = np.full(n_var, len(NB201_PRIMITIVES) - 1)
     else:
         raise NameError('Unknown search space type')
 

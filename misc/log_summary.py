@@ -47,10 +47,12 @@ from typing import Dict, Optional, Union
 # ----------------------------- regex patterns -----------------------------
 
 NETWORK_ID_RE = re.compile(r"Network id\s*=\s*(\d+)")
-# Capture the full Genotype(...) repr including its closing paren. The
-# Genotype repr is single-line in our logs, so a greedy match to the end
-# of the line is correct.
-GENOTYPE_RE = re.compile(r"Architecture\s*=\s*(Genotype\(.*\))\s*$")
+# Capture the full Genotype(...) or NB201Genotype(...) repr including
+# its closing paren. The repr is single-line in our logs, so a greedy
+# match to the end of the line is correct.
+GENOTYPE_RE = re.compile(
+    r"Architecture\s*=\s*((?:NB201Genotype|Genotype)\(.*\))\s*$"
+)
 PARAM_SIZE_RE = re.compile(r"param size\s*=\s*([0-9.eE+-]+)\s*MB")
 FLOPS_RE = re.compile(r"flops\s*=\s*([0-9.eE+-]+)")
 ARCH_SUMMARY_RE = re.compile(

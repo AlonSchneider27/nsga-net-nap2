@@ -47,7 +47,7 @@ To hardcode an absolute data path (e.g. on a Slurm cluster), edit either `DEFAUL
 | `--dataset` | `cifar10` \| `cifar100` \| `ImageNet16-120` | `cifar10` | Selects classes, normalization, image size, and loader. |
 | `--use_nap2` | (store_true) | off | Collect nap2 predicted accuracy alongside training (logged, doesn't change GA objectives). |
 | `--nap2_steps` | int | `5` | Number of snapshots nap2 collects per architecture; each costs ~100 mini-batches of partial training. Lower = faster, less stable; higher = slower, more accurate. |
-| `--search_space` | `micro` \| `macro` | `micro` | Architecture-search grammar. |
+| `--search_space` | `micro` \| `macro` \| `nb201` | `micro` | Architecture-search grammar. `nb201` produces architectures in NAS-Bench-201's canonical arch_str format (5 ops × 6 edges = 15,625 known architectures); use this when you want to cross-reference search results against the NB201 catalog. |
 | `--init_channels` | int | `24` | Stem channel width. |
 | `--layers` | int | `11` | Number of cells. |
 | `--epochs` | int | `25` | Proxy training length per architecture. |
@@ -99,6 +99,19 @@ python search/evolution_search.py \
   --epochs 1 --pop_size 2 --n_offspring 2 --n_gens 1 \
   --output_dir experiments/smoke
 ```
+
+NB201 search space (architectures in canonical NB201 arch_str format, cross-referenceable against the NB201 catalog):
+
+```bash
+python search/evolution_search.py \
+  --search_space nb201 \
+  --dataset cifar10 \
+  --init_channels 16 --layers 15 \
+  --epochs 20 --pop_size 40 --n_offspring 20 --n_gens 30 \
+  --output_dir experiments/nb201_cifar10
+```
+
+The `genotype` field of each row in `summary.json` will be a verbatim NB201 arch_str like `NB201Genotype(arch_str='|nor_conv_3x3~0|+|skip_connect~0|nor_conv_3x3~1|+|...|')` — directly comparable to the NB201 paper's catalog entries.
 
 Validation phase (full retraining of a discovered architecture, requires CUDA):
 
