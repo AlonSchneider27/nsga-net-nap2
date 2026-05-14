@@ -113,6 +113,14 @@ python search/evolution_search.py \
 
 The `genotype` field of each row in `summary.json` will be a verbatim NB201 arch_str like `NB201Genotype(arch_str='|nor_conv_3x3~0|+|skip_connect~0|nor_conv_3x3~1|+|...|')` — directly comparable to the NB201 paper's catalog entries.
 
+NB201 + BiGRU predictor (seed 42, full run; canned script with the Slurm-cluster checkpoint paths baked in):
+
+```bash
+bash scripts/run_cifar10_nb201_bigru.sh
+```
+
+Edit the path block at the top of [scripts/run_cifar10_nb201_bigru.sh](scripts/run_cifar10_nb201_bigru.sh) to point at a different checkpoint set if needed.
+
 Validation phase (full retraining of a discovered architecture, requires CUDA):
 
 ```bash
