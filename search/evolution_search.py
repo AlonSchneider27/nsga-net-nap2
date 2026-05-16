@@ -273,9 +273,16 @@ def main():
         # 6 edges, each picking one of len(NB201_PRIMITIVES) ops.
         # Total design space: len(NB201_PRIMITIVES)**6 = 5**6 = 15_625,
         # which equals the published NB201 catalog.
+        #
+        # dtype=float is required: pymoo's polynomial_mutation does
+        # ``xu += 0.5`` in-place to handle integer-coded variables.
+        # A bare ``np.full(n, 4)`` produces an int64 array, and numpy
+        # refuses the in-place float -> int cast (same_kind rule),
+        # crashing pymoo on the first mutation step. micro/macro
+        # sidestep this by starting from ``np.ones`` (which is float64).
         n_var = nb201_encoding.N_EDGES
         lb = np.zeros(n_var)
-        ub = np.full(n_var, len(NB201_PRIMITIVES) - 1)
+        ub = np.full(n_var, len(NB201_PRIMITIVES) - 1, dtype=float)
     else:
         raise NameError('Unknown search space type')
 
