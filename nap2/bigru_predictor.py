@@ -168,6 +168,19 @@ class BiGRUDualPredictor(nn.Module):
 
         model = cls(**kwargs)
         state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
+
+        # Legacy checkpoints were saved when submodule attributes were
+        # ``gru``/``attn_w``/``dense``/``out`` (no underscore prefix).
+        # The current class uses ``_gru``/``_attn_w``/``_dense``/``_out``,
+        # so a strict load_state_dict on an older .pt fails with a
+        # "Missing/Unexpected key(s)" error. Remap legacy names by
+        # prepending an underscore.
+        _legacy_prefixes = ("gru", "attn_w", "dense", "out")
+        state_dict = {
+            (f"_{k}" if k.split('.', 1)[0] in _legacy_prefixes else k): v
+            for k, v in state_dict.items()
+        }
+
         model.load_state_dict(state_dict)
         model.eval()
         return model
