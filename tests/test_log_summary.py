@@ -56,6 +56,13 @@ TypeError: ufunc 'isinf' not supported for the input types ...
 05/06 08:42:13 PM nap2 pred_acc = 0.0030 (steps=5)
 05/06 08:43:00 PM valid_acc 60.10
 05/06 08:43:00 PM arch 3: valid_acc=60.1000 pred_acc=0.0030
+05/06 08:43:30 PM Network id = 4
+05/06 08:43:30 PM Architecture = NB201Genotype(arch_str='|nor_conv_3x3~0|+|skip_connect~0|nor_conv_3x3~1|+|nor_conv_3x3~0|skip_connect~1|none~2|')
+05/06 08:43:30 PM param size = 0.045000MB
+05/06 08:43:45 PM nap2 pred_acc = 0.4500 (steps=5)
+05/06 08:44:00 PM valid_acc 70.50
+05/06 08:44:00 PM flops = 12.5000
+05/06 08:44:00 PM arch 4: valid_acc=70.5000 pred_acc=0.4500
 05/06 08:44:00 PM generation = 1
 """
 
@@ -100,7 +107,20 @@ def test_scrape_missing_flops_yields_none(sample_log):
 
 def test_scrape_orders_by_arch_id(sample_log):
     result = scrape(sample_log)
-    assert list(result.keys()) == ["1", "2", "3"]
+    assert list(result.keys()) == ["1", "2", "3", "4"]
+
+
+def test_scrape_captures_nb201_genotype_verbatim(sample_log):
+    """NB201Genotype(arch_str='|...') must come through verbatim."""
+    result = scrape(sample_log)
+    arch4 = result["4"]
+    assert arch4["genotype"].startswith("NB201Genotype(arch_str=")
+    # The NB201 arch_str delimiters must round-trip cleanly.
+    assert "|nor_conv_3x3~0|" in arch4["genotype"]
+    assert arch4["genotype"].count("+") == 2
+    assert arch4["valid_acc"] == pytest.approx(70.50)
+    assert arch4["pred_acc"] == pytest.approx(0.4500)
+    assert arch4["flops"] == pytest.approx(12.5)
 
 
 def test_scrape_genotype_is_verbatim(sample_log):
@@ -189,8 +209,8 @@ def test_write_summary_metrics_in_payload(sample_log, tmp_path):
     payload = write_summary(sample_log, out)
     metrics = payload["metrics"]
     assert "error" not in metrics
-    # Fixture has 3 archs; arch 2 has pred_acc=n/a -> 2 paired observations.
-    assert metrics["num_architectures"] == 2
+    # Fixture has 4 archs; arch 2 has pred_acc=n/a -> 3 paired observations.
+    assert metrics["num_architectures"] == 3
     assert metrics["num_failed_predictions"] == 1
 
 
