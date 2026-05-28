@@ -125,7 +125,7 @@ def scrape(log_path: Union[str, Path]) -> Dict[str, Dict]:
                 )
 
                 results[str(arch_id)] = {
-                    "valid_acc": float(m.group(2)),
+                    "valid_acc": float(m.group(2)) / 100.0,
                     "pred_acc": pred_acc,
                     "flops": buf_flops,
                     "param_size_mb": buf_param_size,
@@ -186,7 +186,8 @@ def compute_run_metrics(architectures: Dict[str, Dict]) -> Dict[str, object]:
     # Lazy import so log_summary stays usable in environments where
     # nap2 isn't importable (e.g. the scraper-only CLI).
     from nap2.training.evaluate import compute_metrics
-
+    #print("predicted: ", predicted)
+    # print("ground_truth: ", ground_truth)
     raw = compute_metrics(predicted, ground_truth)
 
     def _clean(x):
