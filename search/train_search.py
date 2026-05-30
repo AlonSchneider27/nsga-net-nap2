@@ -98,10 +98,24 @@ def main(genome, epochs, search_space='micro',
     momentum = 0.9
     weight_decay = 3e-4
     batch_size = 128
+    nesterov = False
     cutout_length = 16
     auxiliary_weight = 0.4
     grad_clip = 5
     report_freq = 50
+
+    # NB201 ground-truth recipe (Dong & Yang, ICLR'20): SGD w/ Nesterov
+    # momentum, lr 0.1, weight decay 5e-4, batch 256, cosine annealing to 0,
+    # grad clip 5. We keep NSGA-Net's short epoch budget, so the cosine
+    # schedule (T_max=epochs, unchanged) compresses the 0.1->0 decay into it.
+    # cutout / auxiliary head / drop-path stay off (already disabled in the
+    # search path), matching NB201's plain augmentation (RandomCrop+HFlip+norm).
+    if search_space == 'nb201':
+        learning_rate = 0.1
+        weight_decay = 5e-4
+        batch_size = 256
+        nesterov = True
+
     train_params = {
         'auxiliary': auxiliary,
         'auxiliary_weight': auxiliary_weight,
@@ -163,7 +177,8 @@ def main(genome, epochs, search_space='micro',
         parameters,
         learning_rate,
         momentum=momentum,
-        weight_decay=weight_decay
+        weight_decay=weight_decay,
+        nesterov=nesterov,
     )
 
     train_transform = build_search_transforms(cfg, train=True)
