@@ -13,6 +13,12 @@ We concatenate the train shards and remap labels to 0..119 to match
 PyTorch CrossEntropy's expectations (and what xautodl's reference loader
 does).
 
+Alternative ``.npy`` layout: if ``x_train.npy`` / ``y_train.npy`` (and
+``x_val.npy`` / ``y_val.npy``) are present under ``root`` they take
+precedence over the pickle batches and are loaded directly — this is the
+format nap2 reads (see nap2/training/train_snapshots_nb201.py). No download
+is attempted in that case.
+
 Auto-download flow mirrors search/cifar10_search.py:
     - If the eleven batch files already exist under ``root``, load them.
     - Otherwise, fetch a tarball from ``IMAGENET16_URL`` (constant below;
@@ -57,6 +63,12 @@ DEFAULT_MD5: str = ''
 TRAIN_BATCHES = tuple(f'train_data_batch_{i}' for i in range(1, 11))
 VAL_FILE = 'val_data'
 EXPECTED_FILES = TRAIN_BATCHES + (VAL_FILE,)
+
+# Alternative .npy layout (x_train/y_train/x_val/y_val), as written by the
+# nap2 data pipeline. Loaded directly when present; takes precedence over the
+# NB201 pickle batches.
+NPY_TRAIN_FILES = ('x_train.npy', 'y_train.npy')
+NPY_VAL_FILES = ('x_val.npy', 'y_val.npy')
 
 
 def _check_md5(fpath: str, expected_md5: str) -> bool:
@@ -141,6 +153,45 @@ def _load_nb201_pickle(path: str):
     return raw, labels
 
 
+def _npy_files_present(root: str, train: bool) -> bool:
+    names = NPY_TRAIN_FILES if train else NPY_VAL_FILES
+    return all(os.path.isfile(os.path.join(root, n)) for n in names)
+
+
+def _load_npy_split(root: str, train: bool):
+    """Load ImageNet16-120 from the .npy layout.
+
+    Mirrors the format nap2 reads (nap2/training/train_snapshots_nb201.py:
+    load_dataset). Robust to the image array being stored flat ((N, 768)),
+    channel-first ((N, 3, 16, 16)), or channel-last ((N, 16, 16, 3)), and to
+    float ([0, 1] or [0, 255]) vs uint8 pixels.
+
+    Returns:
+        data:   ndarray (N, 16, 16, 3) uint8 (HWC, for PIL.Image.fromarray)
+        labels: list[int], 0-indexed
+    """
+    suffix = 'train' if train else 'val'
+    x = np.load(os.path.join(root, f'x_{suffix}.npy'))
+    y = np.load(os.path.join(root, f'y_{suffix}.npy'))
+
+    x = np.asarray(x)
+    if x.ndim == 2:                         # flat (N, 3*16*16) -> (N, 3, 16, 16)
+        x = x.reshape(-1, 3, 16, 16)
+    if x.ndim == 4 and x.shape[1] == 3 and x.shape[-1] != 3:
+        x = x.transpose(0, 2, 3, 1)         # CHW -> HWC for PIL
+    if np.issubdtype(x.dtype, np.floating):
+        if float(x.max()) <= 1.0 + 1e-6:    # floats in [0, 1] -> [0, 255]
+            x = x * 255.0
+        x = np.clip(x, 0, 255).round().astype(np.uint8)
+    else:
+        x = x.astype(np.uint8)
+
+    labels = [int(v) for v in np.asarray(y).ravel().tolist()]
+    if labels and min(labels) == 1:         # defensive: 1..120 -> 0..119
+        labels = [v - 1 for v in labels]
+    return x, labels
+
+
 class ImageNet16(data.Dataset):
     """NB201 ImageNet16-120: 16x16 RGB, 120 classes.
 
@@ -166,6 +217,12 @@ class ImageNet16(data.Dataset):
         self.transform = transform
         self.target_transform = target_transform
         self.train = train
+
+        # Prefer the .npy layout (x_train/y_train/x_val/y_val) when present;
+        # it's the format nap2 writes/reads. No download in this case.
+        if _npy_files_present(self.root, self.train):
+            self._data, self._labels = _load_npy_split(self.root, self.train)
+            return
 
         resolved_url = url or os.environ.get('IMAGENET16_URL', '') or DEFAULT_URL
         resolved_md5 = md5 or DEFAULT_MD5

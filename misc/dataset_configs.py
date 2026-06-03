@@ -37,11 +37,11 @@ DATASET_CONFIGS: Dict[str, Dict[str, Any]] = {
         'image_size': (16, 16),
         'mean': None,   # NB201 protocol: no normalization
         'std':  None,
-        # Default folder name matches the user's layout (`ImageNet16/`,
-        # not `ImageNet16-120/`). Edit this string if your data lives
-        # elsewhere — e.g. an absolute path on a Slurm cluster — or
-        # change DEFAULT_ROOT in search/imagenet16_search.py.
-        'data_dir': 'data/ImageNet16',
+        # Absolute path to the ImageNet16-120 data on the Slurm cluster.
+        # This dir uses the .npy layout (x_train/y_train/x_val/y_val); the
+        # loader auto-detects .npy vs the NB201 pickle batches. Edit for a
+        # different machine, or pass an explicit root to the loader.
+        'data_dir': '/sise/giladkz-group/Gilad-Group/michael/imagenet/data/imagemet16_120',
         'loader_module': 'search.imagenet16_search',
         'loader_class': 'ImageNet16',
     },
