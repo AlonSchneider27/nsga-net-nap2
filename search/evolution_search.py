@@ -76,6 +76,8 @@ parser.add_argument('--nap2_lstm_json', type=str, default='',
                     help='path to the predictor JSON hyperparams; predictor_type detected from this file (required with --use_nap2)')
 parser.add_argument('--nap2_steps', type=int, default=5,
                     help='number of snapshots nap2 collects per architecture; each snapshot costs snapshot_interval (default 100) mini-batches of partial training')
+parser.add_argument('--nap2_max_steps', type=int, default=31,
+                    help='zero-pad the nap2 embedding sequence to this length before prediction, matching the padded length the predictor was trained on (train_lstm.py pads to max_seq_len; predict_anytime.py mirrors it). Set to the training max_snapshots (default 31). Use a value <= --nap2_steps (e.g. 0) to disable padding and reproduce the raw short-sequence behavior.')
 args = parser.parse_args()
 
 log_format = '%(asctime)s %(message)s'
@@ -92,7 +94,7 @@ class NAS(Problem):
     # first define the NAS problem (inherit from pymop)
     def __init__(self, search_space='micro', n_var=20, n_obj=1, n_constr=0, lb=None, ub=None,
                  init_channels=24, layers=8, epochs=25, save_dir=None, predictor=None,
-                 dataset='cifar10', nap2_steps=5):
+                 dataset='cifar10', nap2_steps=5, nap2_max_steps=31):
         super().__init__(n_var=n_var, n_obj=n_obj, n_constr=n_constr, type_var=np.int)
         self.xl = lb
         self.xu = ub
@@ -104,6 +106,7 @@ class NAS(Problem):
         self._predictor = predictor
         self._dataset = dataset
         self._nap2_steps = nap2_steps
+        self._nap2_max_steps = nap2_max_steps
         self._n_evaluated = 0  # keep track of how many architectures are sampled
 
     def _evaluate(self, x, out, *args, **kwargs):
@@ -131,7 +134,8 @@ class NAS(Problem):
                                             expr_root=self._save_dir,
                                             predictor=self._predictor,
                                             dataset=self._dataset,
-                                            nap2_steps=self._nap2_steps)
+                                            nap2_steps=self._nap2_steps,
+                                            nap2_max_steps=self._nap2_max_steps)
 
             # all objectives assume to be MINIMIZED !!!!!
             objs[i, 0] = 100 - performance['valid_acc']
@@ -291,7 +295,8 @@ def main():
                   init_channels=args.init_channels, layers=args.layers,
                   epochs=args.epochs, save_dir=args.save,
                   predictor=predictor, dataset=args.dataset,
-                  nap2_steps=args.nap2_steps)
+                  nap2_steps=args.nap2_steps,
+                  nap2_max_steps=args.nap2_max_steps)
 
     # configure the nsga-net method
     method = engine.nsganet(pop_size=args.pop_size,

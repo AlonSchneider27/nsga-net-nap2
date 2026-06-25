@@ -133,6 +133,7 @@ class NAP2Predictor:
         dataloader: torch.utils.data.DataLoader,
         steps: int = 5,
         training_config: Optional[Dict] = None,
+        max_steps: Optional[int] = None,
     ) -> float:
         """Score a single architecture. Full pipeline in-memory.
 
@@ -141,11 +142,15 @@ class NAP2Predictor:
             dataloader: Training data loader.
             steps: Number of snapshots to collect.
             training_config: Override default training hyperparameters.
+            max_steps: If set, zero-pad the embedding sequence to this length
+                before prediction (matches the padded length the predictor was
+                trained on; see get_embeddings).
 
         Returns:
             Predicted accuracy as a float in [0, 1].
         """
-        embeddings = self.get_embeddings(model, dataloader, steps, training_config)
+        embeddings = self.get_embeddings(model, dataloader, steps, training_config,
+                                         max_steps=max_steps)
         return self._lstm.predict(embeddings)
 
     def score_batch(
@@ -177,6 +182,7 @@ class NAP2Predictor:
         dataloader: torch.utils.data.DataLoader,
         steps: int = 5,
         training_config: Optional[Dict] = None,
+        max_steps: Optional[int] = None,
     ) -> torch.Tensor:
         """Return AE embeddings for novelty scoring.
 
@@ -185,9 +191,17 @@ class NAP2Predictor:
             dataloader: Training data loader.
             steps: Number of snapshots to collect.
             training_config: Override default training hyperparameters.
+            max_steps: If set and greater than the collected sequence length,
+                zero-pad the embedding sequence (real steps first, zeros after)
+                up to ``max_steps``. train_lstm.py pads every training sequence
+                to max_seq_len and trains on truncated-then-zero-padded copies,
+                and predict_anytime.py mirrors this at inference; a raw
+                ``[steps, D]`` sequence is otherwise out of distribution for the
+                GRU's last-hidden-state path.
 
         Returns:
-            Tensor of shape [steps, 256] with concatenated weight+gradient embeddings.
+            Tensor of shape [max(steps, max_steps), 256] with concatenated
+            weight+gradient embeddings.
         """
         config = dict(DEFAULT_TRAINING_CONFIG)
         if training_config is not None:
@@ -210,7 +224,17 @@ class NAP2Predictor:
         gradient_maps = create_feature_map_sequence(gradient_stats)
 
         # Encode feature maps
-        return self._encode_maps(weight_maps, gradient_maps)
+        embeddings = self._encode_maps(weight_maps, gradient_maps)
+
+        # Zero-pad to the length the predictor was trained on (see docstring).
+        if max_steps is not None and max_steps > embeddings.shape[0]:
+            pad = torch.zeros(
+                max_steps - embeddings.shape[0], embeddings.shape[1],
+                dtype=embeddings.dtype,
+            )
+            embeddings = torch.cat([embeddings, pad], dim=0)
+
+        return embeddings
 
     def _partial_train(
         self,
