@@ -146,6 +146,17 @@ def main(genome, epochs, search_space='micro',
         # so cells-per-stage = layers // 3. Floor of 1 keeps tiny smoke
         # runs (e.g. --layers 2) from collapsing.
         n_cells_per_stage = max(layers // 3, 1)
+        if predictor is not None and n_cells_per_stage != 5:
+            # nap2's snapshots were collected on standard NB201 nets (N=5,
+            # build_nb201_model's default). Scoring a different depth feeds
+            # the predictor weight/gradient statistics from a network it was
+            # never trained on.
+            logging.warning(
+                'nap2: --layers %d gives N=%d cells/stage, but the predictor '
+                'was trained on N=5 (NB201 standard). pred_acc will be '
+                'unreliable; use --layers 15.',
+                layers, n_cells_per_stage,
+            )
         model = build_nb201_model(
             genotype.arch_str,
             num_classes=num_classes,

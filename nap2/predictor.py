@@ -6,6 +6,7 @@ autoencoder encoding, and LSTM prediction into a single interface.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -27,6 +28,51 @@ DEFAULT_TRAINING_CONFIG = {
     "weight_decay": 0.0005,
     "snapshot_interval": 100,
 }
+
+# Maps the AE JSON's ``mode`` field to a ``normalize`` value. The AEs shipped
+# under controlled_aes/log_transform/ record {"mode": "log_transform"} and
+# carry no ``normalize`` key at all.
+_AE_MODE_TO_NORMALIZE = {
+    "log_transform": "log",
+    "log": "log",
+    "raw": "none",
+    "none": "none",
+}
+
+
+def resolve_normalize(ae_params: Optional[Dict] = None,
+                      predictor_params: Optional[Dict] = None) -> tuple:
+    """Determine the feature-map normalization the AEs were trained with.
+
+    The transform applied at inference MUST match the one used to train the
+    autoencoders: they were fitted on log-transformed maps, so feeding raw
+    maps (whose stats span orders of magnitude) puts the AE far outside its
+    training distribution and the predictions collapse to the BiGRU's prior.
+
+    The needed value is recorded inconsistently across checkpoint sets, so
+    check every known location rather than defaulting to "none" -- a wrong
+    default silently disables the transform instead of failing loudly:
+
+    1. AE JSON ``normalize``      (explicit; some checkpoint sets)
+    2. AE JSON ``mode``           ("log_transform" -> "log"; michael's AEs)
+    3. predictor JSON ``normalize`` ("log"; the BiGRU checkpoint)
+    4. "none"                     (last resort)
+
+    Returns:
+        ``(normalize, source)`` -- the value plus a human-readable origin,
+        so callers can log which file/key it came from.
+    """
+    if ae_params:
+        if ae_params.get("normalize"):
+            return str(ae_params["normalize"]), "ae_json:normalize"
+        mode = ae_params.get("mode")
+        if mode:
+            mapped = _AE_MODE_TO_NORMALIZE.get(str(mode))
+            if mapped:
+                return mapped, f"ae_json:mode={mode}"
+    if predictor_params and predictor_params.get("normalize"):
+        return str(predictor_params["normalize"]), "predictor_json:normalize"
+    return "none", "default(no normalize/mode found)"
 
 
 class NAP2Predictor:
@@ -100,17 +146,19 @@ class NAP2Predictor:
             params_path=str(base / "ae" / "gradients" / "model_hyper_params.json"),
         )
 
-        # Detect normalization from AE params
-        ae_params_path = base / "ae" / "weights" / "model_hyper_params.json"
-        with open(ae_params_path) as f:
-            ae_params = json.load(f)
-        normalize = ae_params.get("normalize", "none")
-
         # Detect predictor type from LSTM/predictor params
         predictor_params_path = base / "lstm" / "model_hyper_params.json"
         with open(predictor_params_path) as f:
             pred_params = json.load(f)
         predictor_type = pred_params.get("predictor_type", "lstm")
+
+        # Detect normalization. Checks the AE json's `normalize` AND `mode`,
+        # falling back to the predictor json -- see resolve_normalize().
+        ae_params_path = base / "ae" / "weights" / "model_hyper_params.json"
+        with open(ae_params_path) as f:
+            ae_params = json.load(f)
+        normalize, source = resolve_normalize(ae_params, pred_params)
+        logging.info("nap2: feature-map normalize=%s (from %s)", normalize, source)
 
         model_path = str(base / "lstm" / "cp" / "model_state_cp" / "model.pt")
         params_path = str(predictor_params_path)

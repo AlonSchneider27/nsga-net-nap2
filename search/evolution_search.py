@@ -213,17 +213,33 @@ def _load_nap2_predictor(paths):
     """
     import json
     from nap2 import NAP2Predictor
+    from nap2.predictor import resolve_normalize
     from nap2.autoencoder import FeatureMapAutoEncoder
     from nap2.lstm_predictor import LSTMPredictor
     from nap2.bigru_predictor import BiGRUDualPredictor
 
-    normalize = 'none'
+    ae_params = None
     if paths['ae_weights_json']:
         with open(paths['ae_weights_json']) as f:
-            normalize = json.load(f).get('normalize', 'none')
+            ae_params = json.load(f)
 
     with open(paths['lstm_json']) as f:
-        predictor_type = json.load(f).get('predictor_type', 'lstm')
+        pred_params = json.load(f)
+    predictor_type = pred_params.get('predictor_type', 'lstm')
+
+    # The AEs were trained on log-transformed feature maps; inference must
+    # apply the same transform. The value lives under different keys across
+    # checkpoint sets, so resolve it from all of them and log the origin --
+    # a silent fallback to 'none' disables the transform and collapses every
+    # prediction to the predictor's prior.
+    normalize, normalize_src = resolve_normalize(ae_params, pred_params)
+    logging.info('nap2 feature-map normalize=%s (from %s)', normalize, normalize_src)
+    if normalize == 'none':
+        logging.warning(
+            'nap2: normalize resolved to "none" -- no log transform will be '
+            'applied. If these AEs were trained on log-transformed maps '
+            '(controlled_aes/log_transform/...), predictions will be garbage.'
+        )
 
     ae_w = FeatureMapAutoEncoder.load(
         model_path=paths['ae_weights_pt'],
