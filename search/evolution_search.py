@@ -76,8 +76,13 @@ parser.add_argument('--nap2_lstm_json', type=str, default='',
                     help='path to the predictor JSON hyperparams; predictor_type detected from this file (required with --use_nap2)')
 parser.add_argument('--nap2_steps', type=int, default=5,
                     help='number of snapshots nap2 collects per architecture; each snapshot costs snapshot_interval (default 100) mini-batches of partial training')
-parser.add_argument('--nap2_max_steps', type=int, default=31,
-                    help='zero-pad the nap2 embedding sequence to this length before prediction, matching the padded length the predictor was trained on (train_lstm.py pads to max_seq_len; predict_anytime.py mirrors it). Set to the training max_snapshots (default 31). Use a value <= --nap2_steps (e.g. 0) to disable padding and reproduce the raw short-sequence behavior.')
+parser.add_argument('--nap2_max_steps', type=int, default=0,
+                    help='zero-pad the nap2 embedding sequence to this length before prediction. '
+                         'Default 0 = no padding: the deployed BiGRU was trained on length-5 '
+                         'sequences (verified against michael\'s embedding cache '
+                         'cifar10_via_log_cifar10.pkl, [15625 x 5 x 256]), so a plain '
+                         '[steps, 256] sequence is the in-distribution input. Only set this '
+                         'if a future predictor is trained on longer padded sequences.')
 args = parser.parse_args()
 
 log_format = '%(asctime)s %(message)s'
@@ -94,7 +99,7 @@ class NAS(Problem):
     # first define the NAS problem (inherit from pymop)
     def __init__(self, search_space='micro', n_var=20, n_obj=1, n_constr=0, lb=None, ub=None,
                  init_channels=24, layers=8, epochs=25, save_dir=None, predictor=None,
-                 dataset='cifar10', nap2_steps=5, nap2_max_steps=31):
+                 dataset='cifar10', nap2_steps=5, nap2_max_steps=0):
         super().__init__(n_var=n_var, n_obj=n_obj, n_constr=n_constr, type_var=np.int)
         self.xl = lb
         self.xu = ub

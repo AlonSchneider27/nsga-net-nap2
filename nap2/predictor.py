@@ -331,6 +331,12 @@ class NAP2Predictor:
             loss.backward()
             optimizer.step()
 
+            # MPS executes asynchronously; without a sync the collector's
+            # .cpu().numpy() copies can read unfinished buffers (observed:
+            # entire conv layers captured as NaN while live training is
+            # healthy). CUDA/CPU are unaffected.
+            if model_device.type == "mps":
+                torch.mps.synchronize()
             collector.step()
             batch_count += 1
 
@@ -377,7 +383,13 @@ class NAP2Predictor:
             g_emb = self._ae_gradients.encode(g_tensor)  # [1, 128]
 
             # Concatenate: [1, 256]
-            combined = torch.cat([w_emb, g_emb], dim=1)
+            # Deployed-artifact order: [gradients, weights]. Verified against
+            # michael's embedding cache (cifar10_via_log_cifar10.pkl): our
+            # embeddings match it at cos>0.98 in this order (and the BiGRU
+            # reproduces the lookup exactly from the cache), while the
+            # cleaned NAPv2 repo's [w, g] order collapses predictions to
+            # the ~0.9 prior. dims 0-127 = gradient emb, 128-255 = weight emb.
+            combined = torch.cat([g_emb, w_emb], dim=1)
             embeddings.append(combined.squeeze(0))
 
         return torch.stack(embeddings, dim=0)  # [steps, 256]
