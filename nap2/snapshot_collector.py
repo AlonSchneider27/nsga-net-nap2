@@ -84,8 +84,21 @@ class SnapshotCollector:
     # ------------------------------------------------------------------
 
     def _capture(self) -> None:
-        """Capture a single snapshot of all tracked layers."""
+        """Capture a single snapshot of all tracked layers.
+
+        A dead layer (no gradient flow this batch — e.g. its output is zeroed
+        by NB201 ``none`` edges) leaves ``.grad`` as None. Store an explicit
+        zero gradient instead of None: it keeps the layer at its position in
+        the fixed 65-slot feature-map grid (dropping it would shift every
+        later layer up), and a zero-stats row is the "dead layer" signature
+        the predictor's training data contains for such architectures.
+        """
         snapshot: Dict[str, Dict[str, np.ndarray]] = {}
+
+        def _grad_or_zeros(param) -> np.ndarray:
+            if param.grad is not None:
+                return param.grad.cpu().numpy().copy()
+            return np.zeros_like(param.data.cpu().numpy())
 
         for name, module in self._model.named_modules():
             if not isinstance(module, tuple(self._layer_types)):
@@ -95,11 +108,7 @@ class SnapshotCollector:
                 key = f"{name}/conv2d/kernel"
                 snapshot[key] = {
                     "weights": module.weight.data.cpu().numpy().copy(),
-                    "gradients": (
-                        module.weight.grad.cpu().numpy().copy()
-                        if module.weight.grad is not None
-                        else None
-                    ),
+                    "gradients": _grad_or_zeros(module.weight),
                 }
 
             elif isinstance(module, nn.Linear):
@@ -107,22 +116,14 @@ class SnapshotCollector:
                 w_key = f"{name}/dense/kernel"
                 snapshot[w_key] = {
                     "weights": module.weight.data.cpu().numpy().copy(),
-                    "gradients": (
-                        module.weight.grad.cpu().numpy().copy()
-                        if module.weight.grad is not None
-                        else None
-                    ),
+                    "gradients": _grad_or_zeros(module.weight),
                 }
                 # Bias
                 if module.bias is not None:
                     b_key = f"{name}/dense/bias"
                     snapshot[b_key] = {
                         "weights": module.bias.data.cpu().numpy().copy(),
-                        "gradients": (
-                            module.bias.grad.cpu().numpy().copy()
-                            if module.bias.grad is not None
-                            else None
-                        ),
+                        "gradients": _grad_or_zeros(module.bias),
                     }
 
         self._snapshots[self._batch_number] = snapshot

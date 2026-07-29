@@ -76,6 +76,13 @@ parser.add_argument('--nap2_lstm_json', type=str, default='',
                     help='path to the predictor JSON hyperparams; predictor_type detected from this file (required with --use_nap2)')
 parser.add_argument('--nap2_steps', type=int, default=5,
                     help='number of snapshots nap2 collects per architecture; each snapshot costs snapshot_interval (default 100) mini-batches of partial training')
+parser.add_argument('--nap2_max_steps', type=int, default=0,
+                    help='zero-pad the nap2 embedding sequence to this length before prediction. '
+                         'Default 0 = no padding: the deployed BiGRU was trained on length-5 '
+                         'sequences (verified against michael\'s embedding cache '
+                         'cifar10_via_log_cifar10.pkl, [15625 x 5 x 256]), so a plain '
+                         '[steps, 256] sequence is the in-distribution input. Only set this '
+                         'if a future predictor is trained on longer padded sequences.')
 args = parser.parse_args()
 
 log_format = '%(asctime)s %(message)s'
@@ -92,7 +99,7 @@ class NAS(Problem):
     # first define the NAS problem (inherit from pymop)
     def __init__(self, search_space='micro', n_var=20, n_obj=1, n_constr=0, lb=None, ub=None,
                  init_channels=24, layers=8, epochs=25, save_dir=None, predictor=None,
-                 dataset='cifar10', nap2_steps=5):
+                 dataset='cifar10', nap2_steps=5, nap2_max_steps=0):
         super().__init__(n_var=n_var, n_obj=n_obj, n_constr=n_constr, type_var=np.int)
         self.xl = lb
         self.xu = ub
@@ -104,6 +111,7 @@ class NAS(Problem):
         self._predictor = predictor
         self._dataset = dataset
         self._nap2_steps = nap2_steps
+        self._nap2_max_steps = nap2_max_steps
         self._n_evaluated = 0  # keep track of how many architectures are sampled
 
     def _evaluate(self, x, out, *args, **kwargs):
@@ -131,7 +139,8 @@ class NAS(Problem):
                                             expr_root=self._save_dir,
                                             predictor=self._predictor,
                                             dataset=self._dataset,
-                                            nap2_steps=self._nap2_steps)
+                                            nap2_steps=self._nap2_steps,
+                                            nap2_max_steps=self._nap2_max_steps)
 
             # all objectives assume to be MINIMIZED !!!!!
             objs[i, 0] = 100 - performance['valid_acc']
@@ -209,17 +218,33 @@ def _load_nap2_predictor(paths):
     """
     import json
     from nap2 import NAP2Predictor
+    from nap2.predictor import resolve_normalize
     from nap2.autoencoder import FeatureMapAutoEncoder
     from nap2.lstm_predictor import LSTMPredictor
     from nap2.bigru_predictor import BiGRUDualPredictor
 
-    normalize = 'none'
+    ae_params = None
     if paths['ae_weights_json']:
         with open(paths['ae_weights_json']) as f:
-            normalize = json.load(f).get('normalize', 'none')
+            ae_params = json.load(f)
 
     with open(paths['lstm_json']) as f:
-        predictor_type = json.load(f).get('predictor_type', 'lstm')
+        pred_params = json.load(f)
+    predictor_type = pred_params.get('predictor_type', 'lstm')
+
+    # The AEs were trained on log-transformed feature maps; inference must
+    # apply the same transform. The value lives under different keys across
+    # checkpoint sets, so resolve it from all of them and log the origin --
+    # a silent fallback to 'none' disables the transform and collapses every
+    # prediction to the predictor's prior.
+    normalize, normalize_src = resolve_normalize(ae_params, pred_params)
+    logging.info('nap2 feature-map normalize=%s (from %s)', normalize, normalize_src)
+    if normalize == 'none':
+        logging.warning(
+            'nap2: normalize resolved to "none" -- no log transform will be '
+            'applied. If these AEs were trained on log-transformed maps '
+            '(controlled_aes/log_transform/...), predictions will be garbage.'
+        )
 
     ae_w = FeatureMapAutoEncoder.load(
         model_path=paths['ae_weights_pt'],
@@ -291,7 +316,8 @@ def main():
                   init_channels=args.init_channels, layers=args.layers,
                   epochs=args.epochs, save_dir=args.save,
                   predictor=predictor, dataset=args.dataset,
-                  nap2_steps=args.nap2_steps)
+                  nap2_steps=args.nap2_steps,
+                  nap2_max_steps=args.nap2_max_steps)
 
     # configure the nsga-net method
     method = engine.nsganet(pop_size=args.pop_size,

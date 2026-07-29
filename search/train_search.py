@@ -75,7 +75,7 @@ class _LogitsFirstFromNB201(nn.Module):
 def main(genome, epochs, search_space='micro',
          save='Design_1', expr_root='search', seed=0, gpu=0, init_channels=24,
          layers=11, auxiliary=False, cutout=False, drop_path_prob=0.0, predictor=None,
-         dataset='cifar10', nap2_steps=5):
+         dataset='cifar10', nap2_steps=5, nap2_max_steps=0):
 
     # ---- train logger ----------------- #
     save_pth = os.path.join(expr_root, '{}'.format(save))
@@ -146,6 +146,17 @@ def main(genome, epochs, search_space='micro',
         # so cells-per-stage = layers // 3. Floor of 1 keeps tiny smoke
         # runs (e.g. --layers 2) from collapsing.
         n_cells_per_stage = max(layers // 3, 1)
+        if predictor is not None and n_cells_per_stage != 5:
+            # nap2's snapshots were collected on standard NB201 nets (N=5,
+            # build_nb201_model's default). Scoring a different depth feeds
+            # the predictor weight/gradient statistics from a network it was
+            # never trained on.
+            logging.warning(
+                'nap2: --layers %d gives N=%d cells/stage, but the predictor '
+                'was trained on N=5 (NB201 standard). pred_acc will be '
+                'unreliable; use --layers 15.',
+                layers, n_cells_per_stage,
+            )
         model = build_nb201_model(
             genotype.arch_str,
             num_classes=num_classes,
@@ -231,8 +242,10 @@ def main(genome, epochs, search_space='micro',
             # it per epoch but we score before training starts.
             score_model.droprate = 0.0
             score_model = _LogitsOnly(score_model)
-            pred_acc = float(predictor.score(score_model, train_queue, steps=nap2_steps))
-            logging.info('nap2 pred_acc = %.4f (steps=%d)', pred_acc, nap2_steps)
+            pred_acc = float(predictor.score(score_model, train_queue, steps=nap2_steps,
+                                             max_steps=nap2_max_steps))
+            logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s)',
+                         pred_acc, nap2_steps, nap2_max_steps)
             del score_model
         except Exception:
             logging.exception('nap2 prediction failed')

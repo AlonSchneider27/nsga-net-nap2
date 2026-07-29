@@ -6,6 +6,7 @@ autoencoder encoding, and LSTM prediction into a single interface.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -27,6 +28,51 @@ DEFAULT_TRAINING_CONFIG = {
     "weight_decay": 0.0005,
     "snapshot_interval": 100,
 }
+
+# Maps the AE JSON's ``mode`` field to a ``normalize`` value. The AEs shipped
+# under controlled_aes/log_transform/ record {"mode": "log_transform"} and
+# carry no ``normalize`` key at all.
+_AE_MODE_TO_NORMALIZE = {
+    "log_transform": "log",
+    "log": "log",
+    "raw": "none",
+    "none": "none",
+}
+
+
+def resolve_normalize(ae_params: Optional[Dict] = None,
+                      predictor_params: Optional[Dict] = None) -> tuple:
+    """Determine the feature-map normalization the AEs were trained with.
+
+    The transform applied at inference MUST match the one used to train the
+    autoencoders: they were fitted on log-transformed maps, so feeding raw
+    maps (whose stats span orders of magnitude) puts the AE far outside its
+    training distribution and the predictions collapse to the BiGRU's prior.
+
+    The needed value is recorded inconsistently across checkpoint sets, so
+    check every known location rather than defaulting to "none" -- a wrong
+    default silently disables the transform instead of failing loudly:
+
+    1. AE JSON ``normalize``      (explicit; some checkpoint sets)
+    2. AE JSON ``mode``           ("log_transform" -> "log"; michael's AEs)
+    3. predictor JSON ``normalize`` ("log"; the BiGRU checkpoint)
+    4. "none"                     (last resort)
+
+    Returns:
+        ``(normalize, source)`` -- the value plus a human-readable origin,
+        so callers can log which file/key it came from.
+    """
+    if ae_params:
+        if ae_params.get("normalize"):
+            return str(ae_params["normalize"]), "ae_json:normalize"
+        mode = ae_params.get("mode")
+        if mode:
+            mapped = _AE_MODE_TO_NORMALIZE.get(str(mode))
+            if mapped:
+                return mapped, f"ae_json:mode={mode}"
+    if predictor_params and predictor_params.get("normalize"):
+        return str(predictor_params["normalize"]), "predictor_json:normalize"
+    return "none", "default(no normalize/mode found)"
 
 
 class NAP2Predictor:
@@ -100,17 +146,19 @@ class NAP2Predictor:
             params_path=str(base / "ae" / "gradients" / "model_hyper_params.json"),
         )
 
-        # Detect normalization from AE params
-        ae_params_path = base / "ae" / "weights" / "model_hyper_params.json"
-        with open(ae_params_path) as f:
-            ae_params = json.load(f)
-        normalize = ae_params.get("normalize", "none")
-
         # Detect predictor type from LSTM/predictor params
         predictor_params_path = base / "lstm" / "model_hyper_params.json"
         with open(predictor_params_path) as f:
             pred_params = json.load(f)
         predictor_type = pred_params.get("predictor_type", "lstm")
+
+        # Detect normalization. Checks the AE json's `normalize` AND `mode`,
+        # falling back to the predictor json -- see resolve_normalize().
+        ae_params_path = base / "ae" / "weights" / "model_hyper_params.json"
+        with open(ae_params_path) as f:
+            ae_params = json.load(f)
+        normalize, source = resolve_normalize(ae_params, pred_params)
+        logging.info("nap2: feature-map normalize=%s (from %s)", normalize, source)
 
         model_path = str(base / "lstm" / "cp" / "model_state_cp" / "model.pt")
         params_path = str(predictor_params_path)
@@ -133,6 +181,7 @@ class NAP2Predictor:
         dataloader: torch.utils.data.DataLoader,
         steps: int = 5,
         training_config: Optional[Dict] = None,
+        max_steps: Optional[int] = None,
     ) -> float:
         """Score a single architecture. Full pipeline in-memory.
 
@@ -141,11 +190,15 @@ class NAP2Predictor:
             dataloader: Training data loader.
             steps: Number of snapshots to collect.
             training_config: Override default training hyperparameters.
+            max_steps: If set, zero-pad the embedding sequence to this length
+                before prediction (matches the padded length the predictor was
+                trained on; see get_embeddings).
 
         Returns:
             Predicted accuracy as a float in [0, 1].
         """
-        embeddings = self.get_embeddings(model, dataloader, steps, training_config)
+        embeddings = self.get_embeddings(model, dataloader, steps, training_config,
+                                         max_steps=max_steps)
         return self._lstm.predict(embeddings)
 
     def score_batch(
@@ -177,6 +230,7 @@ class NAP2Predictor:
         dataloader: torch.utils.data.DataLoader,
         steps: int = 5,
         training_config: Optional[Dict] = None,
+        max_steps: Optional[int] = None,
     ) -> torch.Tensor:
         """Return AE embeddings for novelty scoring.
 
@@ -185,9 +239,17 @@ class NAP2Predictor:
             dataloader: Training data loader.
             steps: Number of snapshots to collect.
             training_config: Override default training hyperparameters.
+            max_steps: If set and greater than the collected sequence length,
+                zero-pad the embedding sequence (real steps first, zeros after)
+                up to ``max_steps``. train_lstm.py pads every training sequence
+                to max_seq_len and trains on truncated-then-zero-padded copies,
+                and predict_anytime.py mirrors this at inference; a raw
+                ``[steps, D]`` sequence is otherwise out of distribution for the
+                GRU's last-hidden-state path.
 
         Returns:
-            Tensor of shape [steps, 256] with concatenated weight+gradient embeddings.
+            Tensor of shape [max(steps, max_steps), 256] with concatenated
+            weight+gradient embeddings.
         """
         config = dict(DEFAULT_TRAINING_CONFIG)
         if training_config is not None:
@@ -210,7 +272,17 @@ class NAP2Predictor:
         gradient_maps = create_feature_map_sequence(gradient_stats)
 
         # Encode feature maps
-        return self._encode_maps(weight_maps, gradient_maps)
+        embeddings = self._encode_maps(weight_maps, gradient_maps)
+
+        # Zero-pad to the length the predictor was trained on (see docstring).
+        if max_steps is not None and max_steps > embeddings.shape[0]:
+            pad = torch.zeros(
+                max_steps - embeddings.shape[0], embeddings.shape[1],
+                dtype=embeddings.dtype,
+            )
+            embeddings = torch.cat([embeddings, pad], dim=0)
+
+        return embeddings
 
     def _partial_train(
         self,
@@ -259,6 +331,12 @@ class NAP2Predictor:
             loss.backward()
             optimizer.step()
 
+            # MPS executes asynchronously; without a sync the collector's
+            # .cpu().numpy() copies can read unfinished buffers (observed:
+            # entire conv layers captured as NaN while live training is
+            # healthy). CUDA/CPU are unaffected.
+            if model_device.type == "mps":
+                torch.mps.synchronize()
             collector.step()
             batch_count += 1
 
@@ -305,7 +383,13 @@ class NAP2Predictor:
             g_emb = self._ae_gradients.encode(g_tensor)  # [1, 128]
 
             # Concatenate: [1, 256]
-            combined = torch.cat([w_emb, g_emb], dim=1)
+            # Deployed-artifact order: [gradients, weights]. Verified against
+            # michael's embedding cache (cifar10_via_log_cifar10.pkl): our
+            # embeddings match it at cos>0.98 in this order (and the BiGRU
+            # reproduces the lookup exactly from the cache), while the
+            # cleaned NAPv2 repo's [w, g] order collapses predictions to
+            # the ~0.9 prior. dims 0-127 = gradient emb, 128-255 = weight emb.
+            combined = torch.cat([g_emb, w_emb], dim=1)
             embeddings.append(combined.squeeze(0))
 
         return torch.stack(embeddings, dim=0)  # [steps, 256]
