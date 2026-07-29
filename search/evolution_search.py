@@ -74,6 +74,11 @@ parser.add_argument('--nap2_lstm_pt', type=str, default='',
                     help='path to the predictor (LSTM or BiGRU) .pt checkpoint (required with --use_nap2)')
 parser.add_argument('--nap2_lstm_json', type=str, default='',
                     help='path to the predictor JSON hyperparams; predictor_type detected from this file (required with --use_nap2)')
+parser.add_argument('--data', type=str, default='',
+                    help='dataset root directory. Empty = the default in misc/dataset_configs.py '
+                         '(cifar10/cifar100 auto-download there; ImageNet16-120 needs an existing '
+                         'dir with either the NB201 pickle batches or the .npy layout '
+                         'x_train/y_train/x_val/y_val).')
 parser.add_argument('--nap2_steps', type=int, default=5,
                     help='number of snapshots nap2 collects per architecture; each snapshot costs snapshot_interval (default 100) mini-batches of partial training')
 parser.add_argument('--nap2_max_steps', type=int, default=0,
@@ -99,7 +104,7 @@ class NAS(Problem):
     # first define the NAS problem (inherit from pymop)
     def __init__(self, search_space='micro', n_var=20, n_obj=1, n_constr=0, lb=None, ub=None,
                  init_channels=24, layers=8, epochs=25, save_dir=None, predictor=None,
-                 dataset='cifar10', nap2_steps=5, nap2_max_steps=0):
+                 dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0):
         super().__init__(n_var=n_var, n_obj=n_obj, n_constr=n_constr, type_var=np.int)
         self.xl = lb
         self.xu = ub
@@ -110,6 +115,7 @@ class NAS(Problem):
         self._save_dir = save_dir
         self._predictor = predictor
         self._dataset = dataset
+        self._data = data
         self._nap2_steps = nap2_steps
         self._nap2_max_steps = nap2_max_steps
         self._n_evaluated = 0  # keep track of how many architectures are sampled
@@ -139,6 +145,7 @@ class NAS(Problem):
                                             expr_root=self._save_dir,
                                             predictor=self._predictor,
                                             dataset=self._dataset,
+                                            data=self._data,
                                             nap2_steps=self._nap2_steps,
                                             nap2_max_steps=self._nap2_max_steps)
 
@@ -316,6 +323,7 @@ def main():
                   init_channels=args.init_channels, layers=args.layers,
                   epochs=args.epochs, save_dir=args.save,
                   predictor=predictor, dataset=args.dataset,
+                  data=args.data,
                   nap2_steps=args.nap2_steps,
                   nap2_max_steps=args.nap2_max_steps)
 

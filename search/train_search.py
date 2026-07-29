@@ -75,7 +75,7 @@ class _LogitsFirstFromNB201(nn.Module):
 def main(genome, epochs, search_space='micro',
          save='Design_1', expr_root='search', seed=0, gpu=0, init_channels=24,
          layers=11, auxiliary=False, cutout=False, drop_path_prob=0.0, predictor=None,
-         dataset='cifar10', nap2_steps=5, nap2_max_steps=0):
+         dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0):
 
     # ---- train logger ----------------- #
     save_pth = os.path.join(expr_root, '{}'.format(save))
@@ -90,7 +90,7 @@ def main(genome, epochs, search_space='micro',
     # ---- dataset config -------------- #
     cfg = get_config(dataset)
     num_classes = cfg['num_classes']
-    data_root = cfg['data_dir']
+    data_root = data if data else cfg['data_dir']
     image_size = cfg['image_size']
 
     # ---- parameter values setting ----- #
