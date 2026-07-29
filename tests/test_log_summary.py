@@ -77,7 +77,7 @@ def sample_log(tmp_path):
 def test_scrape_normal_arch(sample_log):
     result = scrape(sample_log)
     arch1 = result["1"]
-    assert arch1["valid_acc"] == pytest.approx(58.28)
+    assert arch1["valid_acc"] == pytest.approx(0.5828)
     assert arch1["pred_acc"] == pytest.approx(0.0024)
     assert arch1["flops"] == pytest.approx(67.0994)
     assert arch1["param_size_mb"] == pytest.approx(0.349076)
@@ -91,7 +91,7 @@ def test_scrape_failed_predictor_keeps_arch(sample_log):
     assert "2" in result, "arch 2 must appear even with pred_acc=n/a"
     arch2 = result["2"]
     assert arch2["pred_acc"] is None
-    assert arch2["valid_acc"] == pytest.approx(52.83)
+    assert arch2["valid_acc"] == pytest.approx(0.5283)
     assert arch2["flops"] == pytest.approx(18.3114)
     assert arch2["param_size_mb"] == pytest.approx(0.103444)
 
@@ -101,7 +101,7 @@ def test_scrape_missing_flops_yields_none(sample_log):
     result = scrape(sample_log)
     arch3 = result["3"]
     assert arch3["flops"] is None
-    assert arch3["valid_acc"] == pytest.approx(60.10)
+    assert arch3["valid_acc"] == pytest.approx(0.6010)
     assert arch3["pred_acc"] == pytest.approx(0.0030)
 
 
@@ -118,7 +118,7 @@ def test_scrape_captures_nb201_genotype_verbatim(sample_log):
     # The NB201 arch_str delimiters must round-trip cleanly.
     assert "|nor_conv_3x3~0|" in arch4["genotype"]
     assert arch4["genotype"].count("+") == 2
-    assert arch4["valid_acc"] == pytest.approx(70.50)
+    assert arch4["valid_acc"] == pytest.approx(0.7050)
     assert arch4["pred_acc"] == pytest.approx(0.4500)
     assert arch4["flops"] == pytest.approx(12.5)
 
