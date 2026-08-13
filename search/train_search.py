@@ -75,7 +75,8 @@ class _LogitsFirstFromNB201(nn.Module):
 def main(genome, epochs, search_space='micro',
          save='Design_1', expr_root='search', seed=0, gpu=0, init_channels=24,
          layers=11, auxiliary=False, cutout=False, drop_path_prob=0.0, predictor=None,
-         dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0):
+         dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0,
+         fitness_scorers=None):
 
     # ---- train logger ----------------- #
     save_pth = os.path.join(expr_root, '{}'.format(save))
@@ -250,6 +251,42 @@ def main(genome, epochs, search_space='micro',
         except Exception:
             logging.exception('nap2 prediction failed')
 
+    fitness_scores = None
+    if fitness_scorers:
+        # Learning-curve baselines (SoTL, SoTL-E, Early-Stop, LCE-m, LC-PFN):
+        # one shared partial-training run at the same budget nap2 scores at,
+        # on a throwaway copy so the real training below starts fresh.
+        try:
+            import copy
+            from fitness.trace import run_partial_train
+            from nap2.predictor import DEFAULT_TRAINING_CONFIG
+            budget = nap2_steps * DEFAULT_TRAINING_CONFIG['snapshot_interval']
+            score_model = copy.deepcopy(model)
+            score_model.droprate = 0.0
+            score_model = _LogitsOnly(score_model)
+            trace = run_partial_train(
+                score_model, train_queue, valid_queue, budget,
+                need_val_curve=any(s.needs_val_curve for s in fitness_scorers),
+                need_final_val=any(s.needs_final_val for s in fitness_scorers))
+            fitness_scores = {}
+            for scorer in fitness_scorers:
+                try:
+                    t0 = time.time()
+                    value = float(scorer.score(trace))
+                    t_score = time.time() - t0
+                    fitness_scores[scorer.name] = value
+                    logging.info(
+                        'fitness[%s] = %.6f (budget=%dmb t_train=%.1fs '
+                        't_val=%.1fs t_score=%.2fs)',
+                        scorer.name, value, budget,
+                        trace.times['train'], trace.times['val'], t_score)
+                except Exception:
+                    fitness_scores[scorer.name] = None
+                    logging.exception('fitness[%s] scoring failed', scorer.name)
+            del score_model
+        except Exception:
+            logging.exception('fitness baseline partial training failed')
+
     for epoch in range(epochs):
         scheduler.step()
         logging.info('epoch %d lr %e', epoch, scheduler.get_lr()[0])
@@ -288,6 +325,10 @@ def main(genome, epochs, search_space='micro',
         'params': n_params,
         'flops': n_flops,
         'pred_acc': pred_acc,
+        'fitness_scores': fitness_scores,
+        # Repr of the decoded genotype so the evaluation cache can re-log
+        # the scrapeable 'Architecture = ...' line on cache hits.
+        'genotype': str(genotype),
     }
 
 
