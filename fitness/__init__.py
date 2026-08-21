@@ -1,10 +1,15 @@
-"""Learning-curve fitness baselines (NAP2 paper Sec 4.2, Tables 4-6).
+"""Fitness baselines from the NAP2 paper (Sec 4.2, Tables 4-6).
 
-Build scorers with ``build_scorers('sotl_e,lce_m', ...)`` or
-``build_scorers('all', ...)``; each scorer maps a ``TrainingTrace`` (from
-``fitness.trace.run_partial_train``) to a scalar where higher = better.
-'nap2' is not part of this registry — it keeps its existing predictor path
-in search/evolution_search.py.
+Two families behind one registry:
+- learning-curve methods (sotl, sotl_e, early_stop, lce_m, lc_pfn): score a
+  ``TrainingTrace`` from ``fitness.trace.run_partial_train`` via ``score(trace)``;
+- zero-cost proxies (synflow, grad_norm, snip): ``needs_init_model = True``,
+  score the untrained model from one minibatch via
+  ``score_init(model, inputs, targets)`` — budget-independent.
+
+Build with ``build_scorers('sotl_e,lce_m', ...)`` or ``build_scorers('all', ...)``;
+higher = better for every method. 'nap2' is not part of this registry — it
+keeps its existing predictor path in search/evolution_search.py.
 """
 
 from fitness.scorers import FITNESS_SCORERS, register_fitness  # noqa: F401
@@ -13,9 +18,12 @@ from fitness.trace import TrainingTrace, run_partial_train  # noqa: F401
 # Import implementations to trigger registration.
 import fitness.lce  # noqa: F401
 import fitness.lcpfn_scorer  # noqa: F401
+import fitness.zero_cost  # noqa: F401
 
-# Deterministic 'all' order, matching the paper's table columns.
-ALL_BASELINES = ['sotl', 'sotl_e', 'early_stop', 'lce_m', 'lc_pfn']
+# Deterministic 'all' order, matching the paper's table columns (zero-cost
+# proxies first, then the learning-curve methods).
+ALL_BASELINES = ['synflow', 'grad_norm', 'snip',
+                 'sotl', 'sotl_e', 'early_stop', 'lce_m', 'lc_pfn']
 
 
 def build_scorers(spec, lcpfn_ckpt='', target_epochs=20):

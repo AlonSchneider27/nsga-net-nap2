@@ -92,12 +92,13 @@ parser.add_argument('--nap2_max_steps', type=int, default=0,
                          '[steps, 256] sequence is the in-distribution input. Only set this '
                          'if a future predictor is trained on longer padded sequences.')
 parser.add_argument('--fitness', type=str, default='',
-                    help='comma-separated learning-curve fitness methods to score and log per '
-                         'architecture: any of nap2,sotl,sotl_e,early_stop,lce_m,lc_pfn, or '
-                         '"all" for the five baselines (add nap2 with "all,nap2"). Scores are '
+                    help='comma-separated fitness methods to score and log per architecture: '
+                         'any of nap2,synflow,grad_norm,snip,sotl,sotl_e,early_stop,lce_m,lc_pfn, '
+                         'or "all" for the eight baselines (add nap2 with "all,nap2"). Scores are '
                          'shadow-logged for post-hoc Kendall-tau comparison; the GA objectives '
-                         'stay 100-valid_acc and flops. All baselines share one partial-training '
-                         'run at the --nap2_steps budget.')
+                         'stay 100-valid_acc and flops. Learning-curve methods share one '
+                         'partial-training run at the --nap2_steps budget; zero-cost proxies '
+                         '(synflow/grad_norm/snip) score at initialization, budget-free.')
 parser.add_argument('--lcpfn_ckpt', type=str, default='',
                     help='path to the LC-PFN pretrained checkpoint '
                          '(scripts/fetch_lcpfn_checkpoint.sh; required when --fitness '

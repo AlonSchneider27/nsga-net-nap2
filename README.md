@@ -47,7 +47,7 @@ To hardcode an absolute data path (e.g. on a Slurm cluster), edit either `DEFAUL
 | `--dataset` | `cifar10` \| `cifar100` \| `ImageNet16-120` | `cifar10` | Selects classes, normalization, image size, and loader. |
 | `--use_nap2` | (store_true) | off | Collect nap2 predicted accuracy alongside training (logged, doesn't change GA objectives). |
 | `--nap2_steps` | int | `5` | Number of snapshots nap2 collects per architecture; each costs ~100 mini-batches of partial training. Lower = faster, less stable; higher = slower, more accurate. |
-| `--fitness` | comma list | `''` | Learning-curve baselines to score and log per architecture: any of `nap2,sotl,sotl_e,early_stop,lce_m,lc_pfn`, or `all` (the five baselines; `all,nap2` adds nap2). Shadow-logged like nap2 — GA objectives stay `100-valid_acc` and flops. All baselines share one partial-training run at the `--nap2_steps` budget; `summary.json` gains per-method Kendall-tau under `fitness_metrics`. |
+| `--fitness` | comma list | `''` | Baselines to score and log per architecture: any of `nap2,synflow,grad_norm,snip,sotl,sotl_e,early_stop,lce_m,lc_pfn`, or `all` (the eight baselines; `all,nap2` adds nap2). Shadow-logged like nap2 — GA objectives stay `100-valid_acc` and flops. Learning-curve methods share one partial-training run at the `--nap2_steps` budget; zero-cost proxies score at initialization (budget-free). `summary.json` gains per-method Kendall-tau under `fitness_metrics`. |
 | `--lcpfn_ckpt` | path | `''` | LC-PFN pretrained checkpoint (`scripts/fetch_lcpfn_checkpoint.sh`); required when `--fitness` includes `lc_pfn`. |
 | `--lc_target_epochs` | int | `0` | Epoch horizon `lce_m`/`lc_pfn` extrapolate to. `0` = use `--epochs`; `200` = NB201 full-training horizon. |
 | `--search_space` | `micro` \| `macro` \| `nb201` | `micro` | Architecture-search grammar. `nb201` produces architectures in NAS-Bench-201's canonical arch_str format (5 ops × 6 edges = 15,625 known architectures); use this when you want to cross-reference search results against the NB201 catalog. |
@@ -59,17 +59,20 @@ To hardcode an absolute data path (e.g. on a Slurm cluster), edit either `DEFAUL
 | `--n_gens` | int | `50` | Generations. |
 | `--output_dir` | path | `.` | Parent dir under which run folders are created. |
 
-### Learning-curve fitness baselines
+### Fitness baselines
 
-The five baselines the NAP2 paper compares against (Tables 4-6) are
-implemented in `fitness/`: **SoTL** (-sum of all minibatch train losses),
-**SoTL-E** (-sum over the most recent full epoch; falls back to SoTL below one
-epoch), **Early-Stop** (val acc at budget), **LCE-m** (Domhan 2015 parametric
-ensemble, ported from NASLib), and **LC-PFN** (pretrained transformer
-extrapolation, vendored `lcpfn` — needs >=5 snapshots, otherwise falls back to
-Early-Stop). Enable any subset per run with `--fitness`; scores appear as
-`arch N fitness: ...` log lines and per-method rank metrics land in
-`summary.json` under `fitness_metrics`.
+The eight baselines the NAP2 paper compares against (Tables 4-6) are
+implemented in `fitness/`. Learning-curve methods (share one partial-training
+run at the `--nap2_steps` budget): **SoTL** (-sum of all minibatch train
+losses), **SoTL-E** (-sum over the most recent full epoch; falls back to SoTL
+below one epoch), **Early-Stop** (val acc at budget), **LCE-m** (Domhan 2015
+parametric ensemble, ported from NASLib), and **LC-PFN** (pretrained
+transformer extrapolation, vendored `lcpfn` — needs >=5 snapshots, otherwise
+falls back to Early-Stop). Zero-cost proxies (score the untrained net from one
+minibatch, budget-free): **SynFlow**, **GradNorm**, **SNIP**. Enable any
+subset per run with `--fitness`; scores appear as `arch N fitness: ...` log
+lines and per-method rank metrics land in `summary.json` under
+`fitness_metrics`.
 
 One-time setup for LC-PFN:
 

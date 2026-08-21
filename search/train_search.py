@@ -253,39 +253,80 @@ def main(genome, epochs, search_space='micro',
 
     fitness_scores = None
     if fitness_scorers:
+        import copy
+        fitness_scores = {}
+        init_scorers = [s for s in fitness_scorers
+                        if getattr(s, 'needs_init_model', False)]
+        trace_scorers = [s for s in fitness_scorers
+                         if not getattr(s, 'needs_init_model', False)]
+
+        # Zero-cost proxies (SynFlow, GradNorm, SNIP): score the untrained
+        # network from one minibatch, before any partial training. Each
+        # scorer deepcopies the model internally, so the copy here stays
+        # pristine across scorers.
+        if init_scorers:
+            # Creating a DataLoader iterator draws a base seed from torch's
+            # CPU RNG; save/restore the state so enabling zero-cost methods
+            # cannot shift minibatch order (and thus valid_acc) downstream.
+            rng_state = torch.get_rng_state()
+            try:
+                zc_model = copy.deepcopy(model)
+                zc_model.droprate = 0.0
+                zc_model = _LogitsOnly(zc_model)
+                zc_inputs, zc_targets = next(iter(train_queue))
+                zc_inputs = zc_inputs.to(device)
+                zc_targets = zc_targets.to(device)
+                for scorer in init_scorers:
+                    try:
+                        t0 = time.time()
+                        value = float(scorer.score_init(zc_model, zc_inputs,
+                                                        zc_targets))
+                        fitness_scores[scorer.name] = value
+                        logging.info('fitness[%s] = %.6f (at-init t_score=%.2fs)',
+                                     scorer.name, value, time.time() - t0)
+                    except Exception:
+                        fitness_scores[scorer.name] = None
+                        logging.exception('fitness[%s] scoring failed', scorer.name)
+                del zc_model
+            except Exception:
+                for scorer in init_scorers:
+                    fitness_scores.setdefault(scorer.name, None)
+                logging.exception('zero-cost scoring setup failed')
+            finally:
+                torch.set_rng_state(rng_state)
+
         # Learning-curve baselines (SoTL, SoTL-E, Early-Stop, LCE-m, LC-PFN):
         # one shared partial-training run at the same budget nap2 scores at,
         # on a throwaway copy so the real training below starts fresh.
-        try:
-            import copy
-            from fitness.trace import run_partial_train
-            from nap2.predictor import DEFAULT_TRAINING_CONFIG
-            budget = nap2_steps * DEFAULT_TRAINING_CONFIG['snapshot_interval']
-            score_model = copy.deepcopy(model)
-            score_model.droprate = 0.0
-            score_model = _LogitsOnly(score_model)
-            trace = run_partial_train(
-                score_model, train_queue, valid_queue, budget,
-                need_val_curve=any(s.needs_val_curve for s in fitness_scorers),
-                need_final_val=any(s.needs_final_val for s in fitness_scorers))
-            fitness_scores = {}
-            for scorer in fitness_scorers:
-                try:
-                    t0 = time.time()
-                    value = float(scorer.score(trace))
-                    t_score = time.time() - t0
-                    fitness_scores[scorer.name] = value
-                    logging.info(
-                        'fitness[%s] = %.6f (budget=%dmb t_train=%.1fs '
-                        't_val=%.1fs t_score=%.2fs)',
-                        scorer.name, value, budget,
-                        trace.times['train'], trace.times['val'], t_score)
-                except Exception:
-                    fitness_scores[scorer.name] = None
-                    logging.exception('fitness[%s] scoring failed', scorer.name)
-            del score_model
-        except Exception:
-            logging.exception('fitness baseline partial training failed')
+        if trace_scorers:
+            try:
+                from fitness.trace import run_partial_train
+                from nap2.predictor import DEFAULT_TRAINING_CONFIG
+                budget = nap2_steps * DEFAULT_TRAINING_CONFIG['snapshot_interval']
+                score_model = copy.deepcopy(model)
+                score_model.droprate = 0.0
+                score_model = _LogitsOnly(score_model)
+                trace = run_partial_train(
+                    score_model, train_queue, valid_queue, budget,
+                    need_val_curve=any(s.needs_val_curve for s in trace_scorers),
+                    need_final_val=any(s.needs_final_val for s in trace_scorers))
+                for scorer in trace_scorers:
+                    try:
+                        t0 = time.time()
+                        value = float(scorer.score(trace))
+                        t_score = time.time() - t0
+                        fitness_scores[scorer.name] = value
+                        logging.info(
+                            'fitness[%s] = %.6f (budget=%dmb t_train=%.1fs '
+                            't_val=%.1fs t_score=%.2fs)',
+                            scorer.name, value, budget,
+                            trace.times['train'], trace.times['val'], t_score)
+                    except Exception:
+                        fitness_scores[scorer.name] = None
+                        logging.exception('fitness[%s] scoring failed', scorer.name)
+                del score_model
+            except Exception:
+                logging.exception('fitness baseline partial training failed')
 
     for epoch in range(epochs):
         scheduler.step()

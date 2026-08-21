@@ -168,8 +168,10 @@ def main():
     scorers = build_scorers(a.methods, lcpfn_ckpt=a.lcpfn_ckpt,
                             target_epochs=a.target_epochs)
     methods = [s.name for s in scorers]
-    need_curve = any(s.needs_val_curve for s in scorers)
-    need_final = any(s.needs_final_val for s in scorers)
+    init_scorers = [s for s in scorers if getattr(s, 'needs_init_model', False)]
+    trace_scorers = [s for s in scorers if not getattr(s, 'needs_init_model', False)]
+    need_curve = any(s.needs_val_curve for s in trace_scorers)
+    need_final = any(s.needs_final_val for s in trace_scorers)
 
     train_loader = load_dataset(a.dataset_dir, dataset_name="cifar10",
                                 batch_size=BATCH_SIZE)
@@ -186,29 +188,58 @@ def main():
           f"methods={methods} device={device} seed={a.seed}")
 
     np.random.seed(a.seed)
+    zc_batch = None
+    if init_scorers:
+        zc_inputs, zc_targets = next(iter(train_loader))
+        zc_batch = (zc_inputs.to(device), zc_targets.to(device))
+
+    def checked(name, s, raw):
+        """float() + non-finite guard shared by both scorer families.
+
+        A diverged arch yields NaN losses -> NaN sotl/sotl_e (and synflow can
+        overflow to inf on double); treat non-finite scores as failures so
+        they can't poison the KT columns.
+        """
+        value = float(raw)
+        if value != value or value in (float('inf'), float('-inf')):
+            print(f"  {name}@{s}: non-finite score, dropped")
+            return None
+        return value
+
     rows = []
     for i, arch in enumerate(archs):
         t0 = time.time()
         torch.manual_seed(0)   # search parity: same init seed per arch
         model = build_nb201_model(arch, num_classes=10, C=16, N=5).to(device)
-        trace = run_partial_train(model, train_loader, valid_loader,
-                                  max(steps_list) * 100,
-                                  need_val_curve=need_curve,
-                                  need_final_val=need_final)
+
+        # Zero-cost proxies score the untrained net once; their value is
+        # budget-independent and fills every budget column below.
+        init_values = {}
+        for scorer in init_scorers:
+            try:
+                init_values[scorer.name] = checked(
+                    scorer.name, 'init',
+                    scorer.score_init(model, zc_batch[0], zc_batch[1]))
+            except Exception as e:
+                print(f"  {scorer.name}@init: failed ({e})")
+                init_values[scorer.name] = None
+
+        trace = None
+        if trace_scorers:
+            trace = run_partial_train(model, train_loader, valid_loader,
+                                      max(steps_list) * 100,
+                                      need_val_curve=need_curve,
+                                      need_final_val=need_final)
         scores = {}
         for s in steps_list:
+            scores[s] = dict(init_values)
+            if trace is None:
+                continue
             sub = prefix_trace(trace, s)
-            scores[s] = {}
-            for scorer in scorers:
+            for scorer in trace_scorers:
                 try:
-                    value = float(scorer.score(sub))
-                    # A diverged arch yields NaN losses -> NaN sotl/sotl_e;
-                    # treat non-finite scores as failures so they can't
-                    # poison the KT columns.
-                    if value != value or value in (float('inf'), float('-inf')):
-                        print(f"  {scorer.name}@{s}: non-finite score, dropped")
-                        value = None
-                    scores[s][scorer.name] = value
+                    scores[s][scorer.name] = checked(scorer.name, s,
+                                                     scorer.score(sub))
                 except Exception as e:
                     print(f"  {scorer.name}@{s}: failed ({e})")
                     scores[s][scorer.name] = None
@@ -216,8 +247,10 @@ def main():
         top = scores[max(steps_list)]
         summary = " ".join(f"{m}={top[m]:.4f}" for m in methods
                            if top.get(m) is not None)
+        t_train = trace.times['train'] if trace is not None else 0.0
+        t_val = trace.times['val'] if trace is not None else 0.0
         print(f"{i:>3} valid={gt[arch]:.4f} t={(time.time()-t0)/60:.1f}min "
-              f"t_train={trace.times['train']:.0f}s t_val={trace.times['val']:.0f}s "
+              f"t_train={t_train:.0f}s t_val={t_val:.0f}s "
               f"| @{max(steps_list)}: {summary}", flush=True)
         if len(rows) >= 5 and len(rows) % 5 == 0:
             report(rows, gt, methods, steps_list)
