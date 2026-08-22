@@ -135,3 +135,28 @@ def run_partial_train(model, train_queue, valid_queue, budget_minibatches,
         snapshot_interval=interval,
         times={'train': t_train, 'val': t_val},
     )
+
+
+def prefix_trace(trace, steps):
+    """Truncate a trace to a smaller snapshot budget (prefix of the run).
+
+    The paper's budget protocol: every method at budget k consumes the first
+    k*interval minibatches of ONE partial-training run. In curve-free mode
+    (no val curve collected) only the full budget keeps its final_val_acc.
+    """
+    mb = steps * trace.snapshot_interval
+    curve = trace.val_acc_curve[:steps]
+    if curve:
+        final = curve[-1]
+    elif mb == len(trace.minibatch_losses):
+        final = trace.final_val_acc
+    else:
+        final = None
+    return TrainingTrace(
+        minibatch_losses=trace.minibatch_losses[:mb],
+        val_acc_curve=curve,
+        final_val_acc=final,
+        epoch_len=trace.epoch_len,
+        snapshot_interval=trace.snapshot_interval,
+        times=trace.times,
+    )

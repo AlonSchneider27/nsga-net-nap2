@@ -99,6 +99,15 @@ parser.add_argument('--fitness', type=str, default='',
                          'stay 100-valid_acc and flops. Learning-curve methods share one '
                          'partial-training run at the --nap2_steps budget; zero-cost proxies '
                          '(synflow/grad_norm/snip) score at initialization, budget-free.')
+parser.add_argument('--nap2_steps_list', type=str, default='',
+                    help='comma-separated snapshot budgets, e.g. "1,3,5,10,15". ONE '
+                         'partial-training run per architecture at max(list); every '
+                         'fitness method AND nap2 are then scored at each budget from '
+                         'prefixes of that run, logged with @budget-suffixed keys '
+                         '(sotl@3=..., nap2@15=...) so summary.json reports KT per '
+                         '(method, budget). Zero-cost proxies stay budget-free (plain '
+                         'keys). Empty (default) = single budget from --nap2_steps '
+                         'with plain keys, exactly as before.')
 parser.add_argument('--lcpfn_ckpt', type=str, default='',
                     help='path to the LC-PFN pretrained checkpoint '
                          '(scripts/fetch_lcpfn_checkpoint.sh; required when --fitness '
@@ -124,7 +133,7 @@ class NAS(Problem):
     def __init__(self, search_space='micro', n_var=20, n_obj=1, n_constr=0, lb=None, ub=None,
                  init_channels=24, layers=8, epochs=25, save_dir=None, predictor=None,
                  dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0,
-                 fitness_scorers=None):
+                 fitness_scorers=None, nap2_steps_list=None):
         super().__init__(n_var=n_var, n_obj=n_obj, n_constr=n_constr, type_var=np.int)
         self.xl = lb
         self.xu = ub
@@ -139,6 +148,7 @@ class NAS(Problem):
         self._nap2_steps = nap2_steps
         self._nap2_max_steps = nap2_max_steps
         self._fitness_scorers = fitness_scorers
+        self._nap2_steps_list = nap2_steps_list
         # Genome-keyed cache: pymoo dedups offspring within a generation but
         # re-samples across generations, and every re-evaluation costs a full
         # proxy training. Budget and method set are constant within a run, so
@@ -185,7 +195,8 @@ class NAS(Problem):
                                                 data=self._data,
                                                 nap2_steps=self._nap2_steps,
                                                 nap2_max_steps=self._nap2_max_steps,
-                                                fitness_scorers=self._fitness_scorers)
+                                                fitness_scorers=self._fitness_scorers,
+                                                nap2_steps_list=self._nap2_steps_list)
                 self._perf_cache[cache_key] = performance
 
             # all objectives assume to be MINIMIZED !!!!!
@@ -343,6 +354,18 @@ def main():
                      [s.name for s in fitness_scorers],
                      args.lc_target_epochs or args.epochs)
 
+    # Parse --nap2_steps_list into sorted unique positive ints (or None).
+    nap2_steps_list = None
+    if args.nap2_steps_list:
+        nap2_steps_list = sorted({int(s) for s in args.nap2_steps_list.split(',')
+                                  if s.strip()})
+        if not nap2_steps_list or any(k < 1 for k in nap2_steps_list):
+            raise ValueError(f'--nap2_steps_list must be positive ints, '
+                             f'got {args.nap2_steps_list!r}')
+        logging.info('budget list enabled: %s snapshots (partial train at %d, '
+                     'all methods scored per budget from prefixes)',
+                     nap2_steps_list, nap2_steps_list[-1])
+
     predictor = None
     if wants_nap2:
         paths = _resolve_nap2_paths(args)
@@ -392,7 +415,8 @@ def main():
                   data=args.data,
                   nap2_steps=args.nap2_steps,
                   nap2_max_steps=args.nap2_max_steps,
-                  fitness_scorers=fitness_scorers)
+                  fitness_scorers=fitness_scorers,
+                  nap2_steps_list=nap2_steps_list)
 
     # configure the nsga-net method
     method = engine.nsganet(pop_size=args.pop_size,

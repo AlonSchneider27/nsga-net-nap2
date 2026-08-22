@@ -59,10 +59,12 @@ FLOPS_RE = re.compile(r"flops\s*=\s*([0-9.eE+-]+)")
 ARCH_SUMMARY_RE = re.compile(
     r"arch\s+(\d+):\s*valid_acc=([0-9.eE+-]+)\s+pred_acc=(n/a|[0-9.eE+-]+)"
 )
-# Learning-curve baseline scores, logged right after the arch summary line:
+# Baseline fitness scores, logged right after the arch summary line:
 #   arch 7 fitness: sotl=-123.456 sotl_e=-45.61 early_stop=0.4213 ...
+# With --nap2_steps_list, keys carry an @budget suffix (one score per budget):
+#   arch 7 fitness: sotl@1=-32.1 sotl@5=-123.456 nap2@5=0.8412 ...
 ARCH_FITNESS_RE = re.compile(r"arch\s+(\d+)\s+fitness:\s*(.+)$")
-FITNESS_PAIR_RE = re.compile(r"(\w+)=([0-9.eE+-]+)")
+FITNESS_PAIR_RE = re.compile(r"([\w@]+)=([0-9.eE+-]+)")
 
 
 # ----------------------------- public API ---------------------------------

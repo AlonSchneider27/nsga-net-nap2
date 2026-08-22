@@ -39,7 +39,7 @@ import torchvision
 import torchvision.transforms as T
 
 from fitness import build_scorers
-from fitness.trace import TrainingTrace, run_partial_train
+from fitness.trace import TrainingTrace, prefix_trace, run_partial_train  # noqa: F401 (prefix_trace re-exported for tests)
 from misc.log_summary import scrape
 from nap2.search_spaces.nb201_ops import build_nb201_model
 from nap2.training.evaluate import compute_metrics
@@ -74,29 +74,6 @@ def stratified_sample(gt, n, seed):
         j = int(i * stride + rng.uniform(0, stride))
         picks.append(ordered[min(j, len(ordered) - 1)])
     return list(dict.fromkeys(picks))
-
-
-def prefix_trace(trace, steps):
-    """Truncate a max-budget trace to a smaller snapshot budget."""
-    mb = steps * trace.snapshot_interval
-    curve = trace.val_acc_curve[:steps]
-    if curve:
-        final = curve[-1]
-    elif mb == len(trace.minibatch_losses):
-        # Curve-free mode (no lce_m/lc_pfn selected): the runner still
-        # measured final_val_acc at budget end, valid for the full budget.
-        final = trace.final_val_acc
-    else:
-        # Smaller budgets have no val measurement in curve-free mode.
-        final = None
-    return TrainingTrace(
-        minibatch_losses=trace.minibatch_losses[:mb],
-        val_acc_curve=curve,
-        final_val_acc=final,
-        epoch_len=trace.epoch_len,
-        snapshot_interval=trace.snapshot_interval,
-        times=trace.times,
-    )
 
 
 def report(rows, gt, methods, steps_list):

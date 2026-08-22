@@ -286,3 +286,25 @@ def test_fitness_metrics_per_method(fitness_log, tmp_path):
 def test_payload_shape_unchanged_without_fitness(sample_log, tmp_path):
     payload = write_summary(sample_log, tmp_path / "summary.json")
     assert set(payload) == {"architectures", "metrics"}
+
+
+BUDGET_FITNESS_LINES = """\
+05/06 08:37:00 PM Network id = 1
+05/06 08:37:10 PM Architecture = NB201Genotype(arch_str='|none~0|+|none~0|none~1|+|none~0|none~1|none~2|')
+05/06 08:37:20 PM param size = 0.1MB
+05/06 08:37:30 PM flops = 1.0
+05/06 08:38:00 PM arch 1: valid_acc=61.2000 pred_acc=0.8412
+05/06 08:38:00 PM arch 1 fitness: sotl@1=-32.100000 sotl@5=-123.456000 nap2@1=0.812300 nap2@5=0.841200 synflow=1.5e+30
+"""
+
+
+def test_scrape_budget_suffixed_fitness_keys(tmp_path):
+    log = tmp_path / "log.txt"
+    log.write_text(BUDGET_FITNESS_LINES)
+    from misc.log_summary import scrape
+    arch = scrape(log)["1"]
+    assert arch["fitness"] == {
+        "sotl@1": -32.1, "sotl@5": -123.456,
+        "nap2@1": 0.8123, "nap2@5": 0.8412,
+        "synflow": 1.5e+30,
+    }

@@ -76,7 +76,7 @@ def main(genome, epochs, search_space='micro',
          save='Design_1', expr_root='search', seed=0, gpu=0, init_channels=24,
          layers=11, auxiliary=False, cutout=False, drop_path_prob=0.0, predictor=None,
          dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0,
-         fitness_scorers=None):
+         fitness_scorers=None, nap2_steps_list=None):
 
     # ---- train logger ----------------- #
     save_pth = os.path.join(expr_root, '{}'.format(save))
@@ -226,6 +226,7 @@ def main(genome, epochs, search_space='micro',
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, int(t_max))
 
     pred_acc = None
+    nap2_budget_preds = None
     if predictor is not None:
         try:
             import copy
@@ -243,21 +244,46 @@ def main(genome, epochs, search_space='micro',
             # it per epoch but we score before training starts.
             score_model.droprate = 0.0
             score_model = _LogitsOnly(score_model)
-            pred_acc = float(predictor.score(score_model, train_queue, steps=nap2_steps,
-                                             max_steps=nap2_max_steps))
-            logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s)',
-                         pred_acc, nap2_steps, nap2_max_steps)
+            if nap2_steps_list:
+                # Budget-list mode: ONE snapshot collection at the largest
+                # budget, then predict every prefix (per-budget padding
+                # semantics identical to a single run at that budget).
+                emb = predictor.get_embeddings(score_model, train_queue,
+                                               steps=max(nap2_steps_list))
+                nap2_budget_preds = {}
+                for k in nap2_steps_list:
+                    seq = emb[:k]
+                    if nap2_max_steps and nap2_max_steps > seq.shape[0]:
+                        pad = torch.zeros(nap2_max_steps - seq.shape[0],
+                                          seq.shape[1], dtype=seq.dtype)
+                        seq = torch.cat([seq, pad], dim=0)
+                    nap2_budget_preds[k] = float(predictor._lstm.predict(seq))
+                pred_acc = nap2_budget_preds[max(nap2_steps_list)]
+                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s; budgets %s)',
+                             pred_acc, max(nap2_steps_list), nap2_max_steps,
+                             ' '.join(f'@{k}={v:.4f}'
+                                      for k, v in sorted(nap2_budget_preds.items())))
+            else:
+                pred_acc = float(predictor.score(score_model, train_queue, steps=nap2_steps,
+                                                 max_steps=nap2_max_steps))
+                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s)',
+                             pred_acc, nap2_steps, nap2_max_steps)
             del score_model
         except Exception:
             logging.exception('nap2 prediction failed')
 
     fitness_scores = None
-    if fitness_scorers:
+    if fitness_scorers or nap2_budget_preds:
         import copy
         fitness_scores = {}
-        init_scorers = [s for s in fitness_scorers
+        # Budget-list mode: nap2's per-budget predictions join the fitness
+        # dict as nap2@k so the summary computes KT per (method, budget).
+        if nap2_budget_preds:
+            for k, v in sorted(nap2_budget_preds.items()):
+                fitness_scores[f'nap2@{k}'] = v
+        init_scorers = [s for s in (fitness_scorers or [])
                         if getattr(s, 'needs_init_model', False)]
-        trace_scorers = [s for s in fitness_scorers
+        trace_scorers = [s for s in (fitness_scorers or [])
                          if not getattr(s, 'needs_init_model', False)]
 
         # Zero-cost proxies (SynFlow, GradNorm, SNIP): score the untrained
@@ -300,30 +326,45 @@ def main(genome, epochs, search_space='micro',
         # on a throwaway copy so the real training below starts fresh.
         if trace_scorers:
             try:
-                from fitness.trace import run_partial_train
+                from fitness.trace import prefix_trace, run_partial_train
                 from nap2.predictor import DEFAULT_TRAINING_CONFIG
-                budget = nap2_steps * DEFAULT_TRAINING_CONFIG['snapshot_interval']
+                interval = DEFAULT_TRAINING_CONFIG['snapshot_interval']
+                multi = bool(nap2_steps_list)
+                budgets = sorted(set(nap2_steps_list)) if multi else [nap2_steps]
+                budget = budgets[-1] * interval
                 score_model = copy.deepcopy(model)
                 score_model.droprate = 0.0
                 score_model = _LogitsOnly(score_model)
+                # Sub-max budgets read early_stop from the val curve, so a
+                # multi-budget run needs the curve whenever any scorer wants
+                # a final val measurement.
+                need_final = any(s.needs_final_val for s in trace_scorers)
+                need_curve = any(s.needs_val_curve for s in trace_scorers) \
+                    or (len(budgets) > 1 and need_final)
                 trace = run_partial_train(
                     score_model, train_queue, valid_queue, budget,
-                    need_val_curve=any(s.needs_val_curve for s in trace_scorers),
-                    need_final_val=any(s.needs_final_val for s in trace_scorers))
+                    need_val_curve=need_curve, need_final_val=need_final)
                 for scorer in trace_scorers:
-                    try:
-                        t0 = time.time()
-                        value = float(scorer.score(trace))
-                        t_score = time.time() - t0
-                        fitness_scores[scorer.name] = value
-                        logging.info(
-                            'fitness[%s] = %.6f (budget=%dmb t_train=%.1fs '
-                            't_val=%.1fs t_score=%.2fs)',
-                            scorer.name, value, budget,
-                            trace.times['train'], trace.times['val'], t_score)
-                    except Exception:
-                        fitness_scores[scorer.name] = None
-                        logging.exception('fitness[%s] scoring failed', scorer.name)
+                    values = {}
+                    t0 = time.time()
+                    for k in budgets:
+                        key = f'{scorer.name}@{k}' if multi else scorer.name
+                        try:
+                            sub = prefix_trace(trace, k) if multi else trace
+                            value = float(scorer.score(sub))
+                            fitness_scores[key] = value
+                            values[k] = value
+                        except Exception:
+                            fitness_scores[key] = None
+                            logging.exception('fitness[%s] scoring failed at '
+                                              'budget %d', scorer.name, k)
+                    t_score = time.time() - t0
+                    logging.info(
+                        'fitness[%s] = %s (t_train=%.1fs t_val=%.1fs t_score=%.2fs)',
+                        scorer.name,
+                        ' '.join(f'@{k*interval}mb={v:.6f}'
+                                 for k, v in sorted(values.items())),
+                        trace.times['train'], trace.times['val'], t_score)
                 del score_model
             except Exception:
                 logging.exception('fitness baseline partial training failed')
