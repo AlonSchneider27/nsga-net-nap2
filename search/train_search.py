@@ -170,6 +170,11 @@ def main(genome, epochs, search_space='micro',
     else:
         raise NameError('Unknown search space type')
 
+    # NetworkCIFAR.forward reads self.droprate; the epoch loop below only
+    # sets it when epochs > 0, but infer()/flops still run the forward pass
+    # (--epochs 0 guided runs). Harmless for macro/nb201.
+    model.droprate = 0.0
+
     # logging.info("Genome = %s", genome)
     logging.info("Architecture = %s", genotype)
 
