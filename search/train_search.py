@@ -243,7 +243,12 @@ def main(genome, epochs, search_space='micro',
             # to CPU because nap2's float64 AE + MPS produces NNPack dtype
             # mismatches; on CUDA/CPU, score on the same device as training.
             score_model = copy.deepcopy(model)
-            if device == 'mps':
+            # Historically nap2 scoring dropped to CPU on MPS (float64 AE
+            # pipeline). The partial-training stage itself is float32 and the
+            # snapshot collector syncs + moves captures to CPU, so MPS partial
+            # training is allowed via env opt-in (validated against CPU
+            # reference scores before use).
+            if device == 'mps' and not os.environ.get('NAP2_SCORE_ON_MPS'):
                 score_model = score_model.cpu()
             # NetworkCIFAR.forward reads self.droprate; the training loop sets
             # it per epoch but we score before training starts.
