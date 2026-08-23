@@ -9,6 +9,7 @@ evaluated architecture, a fixed sequence of lines::
     ...                                            (training output)
     ... flops = <float>
     ... arch <id>: valid_acc=<float> pred_acc=<float|n/a>
+    ... arch <id> fitness: sotl_e=<float> lce_m=<float> ...   (optional)
 
 This module reads such a log and emits a dict mapping arch id (str) to::
 
@@ -58,6 +59,12 @@ FLOPS_RE = re.compile(r"flops\s*=\s*([0-9.eE+-]+)")
 ARCH_SUMMARY_RE = re.compile(
     r"arch\s+(\d+):\s*valid_acc=([0-9.eE+-]+)\s+pred_acc=(n/a|[0-9.eE+-]+)"
 )
+# Baseline fitness scores, logged right after the arch summary line:
+#   arch 7 fitness: sotl=-123.456 sotl_e=-45.61 early_stop=0.4213 ...
+# With --nap2_steps_list, keys carry an @budget suffix (one score per budget):
+#   arch 7 fitness: sotl@1=-32.1 sotl@5=-123.456 nap2@5=0.8412 ...
+ARCH_FITNESS_RE = re.compile(r"arch\s+(\d+)\s+fitness:\s*(.+)$")
+FITNESS_PAIR_RE = re.compile(r"([\w@]+)=([0-9.eE+-]+)")
 
 
 # ----------------------------- public API ---------------------------------
@@ -138,6 +145,18 @@ def scrape(log_path: Union[str, Path]) -> Dict[str, Dict]:
                 buf_genotype = None
                 buf_param_size = None
                 buf_flops = None
+                continue
+
+            m = ARCH_FITNESS_RE.search(line)
+            if m:
+                # Emitted after the arch summary line, so the arch entry
+                # already exists; attach by id.
+                arch = results.get(m.group(1))
+                if arch is not None:
+                    arch["fitness"] = {
+                        name: float(value)
+                        for name, value in FITNESS_PAIR_RE.findall(m.group(2))
+                    }
 
     # Stable, numeric-id ordering for human-readable JSON.
     return {k: results[k] for k in sorted(results, key=int)}
@@ -206,6 +225,36 @@ def compute_run_metrics(architectures: Dict[str, Dict]) -> Dict[str, object]:
     }
 
 
+def compute_fitness_metrics(architectures: Dict[str, Dict]) -> Dict[str, Dict]:
+    """Per-method ranking metrics for the learning-curve baseline scores.
+
+    For every method that appears in any architecture's ``fitness`` dict,
+    computes the same rollup as :func:`compute_run_metrics` between that
+    method's scores and ``valid_acc``. Rank metrics are scale-free, so
+    negative loss-sum scores (sotl/sotl_e) compare directly against
+    accuracy. Returns {} when no fitness scores were logged.
+    """
+    methods = sorted({
+        name
+        for v in architectures.values()
+        for name in (v.get("fitness") or {})
+    })
+    out: Dict[str, Dict] = {}
+    for method in methods:
+        subset = {
+            k: {"valid_acc": v.get("valid_acc"),
+                "pred_acc": (v.get("fitness") or {}).get(method)}
+            for k, v in architectures.items()
+        }
+        out[method] = compute_run_metrics(subset)
+        # 'failed predictions' counts archs without this method's score.
+        out[method]["num_failed_predictions"] = sum(
+            1 for v in architectures.values()
+            if method not in (v.get("fitness") or {})
+        )
+    return out
+
+
 def write_summary(
     log_path: Union[str, Path],
     output_path: Union[str, Path],
@@ -235,6 +284,12 @@ def write_summary(
         metrics = {"error": f"{type(e).__name__}: {e}"}
 
     payload = {"architectures": architectures, "metrics": metrics}
+    if any(v.get("fitness") for v in architectures.values()):
+        try:
+            payload["fitness_metrics"] = compute_fitness_metrics(architectures)
+        except Exception as e:
+            logging.exception("compute_fitness_metrics failed")
+            payload["fitness_metrics"] = {"error": f"{type(e).__name__}: {e}"}
     with Path(output_path).open("w") as f:
         json.dump(payload, f, indent=2)
     return payload

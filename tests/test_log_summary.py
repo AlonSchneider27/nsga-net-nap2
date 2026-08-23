@@ -227,3 +227,84 @@ def test_resolve_log_path_file(sample_log):
 def test_resolve_log_path_missing(tmp_path):
     with pytest.raises(FileNotFoundError):
         resolve_log_path(tmp_path / "nonexistent")
+
+
+# ---- learning-curve baseline fitness lines --------------------------------
+
+FITNESS_LOG = """\
+05/06 08:36:01 PM Network id = 1
+05/06 08:36:01 PM Architecture = NB201Genotype(arch_str='|nor_conv_3x3~0|+|skip_connect~0|nor_conv_3x3~1|+|nor_conv_3x3~0|skip_connect~1|none~2|')
+05/06 08:36:01 PM param size = 0.349076MB
+05/06 08:38:00 PM flops = 67.0994
+05/06 08:38:00 PM arch 1: valid_acc=58.2800 pred_acc=n/a
+05/06 08:38:00 PM arch 1 fitness: sotl=-123.456000 sotl_e=-45.610000 early_stop=0.421300 lce_m=0.871200
+05/06 08:39:00 PM Network id = 2
+05/06 08:39:00 PM Architecture = NB201Genotype(arch_str='|none~0|+|none~0|none~1|+|none~0|none~1|none~2|')
+05/06 08:39:00 PM param size = 0.103444MB
+05/06 08:41:00 PM flops = 18.3114
+05/06 08:41:00 PM arch 2: valid_acc=70.8300 pred_acc=n/a
+05/06 08:41:00 PM arch 2 fitness: sotl=-100.000000 sotl_e=-30.500000 early_stop=0.650000 lce_m=0.900000
+05/06 08:42:00 PM Network id = 3
+05/06 08:42:00 PM Architecture = NB201Genotype(arch_str='|none~0|+|none~0|none~1|+|none~0|skip_connect~1|none~2|')
+05/06 08:42:00 PM param size = 0.220000MB
+05/06 08:43:00 PM flops = 20.0
+05/06 08:43:00 PM arch 3: valid_acc=80.1000 pred_acc=n/a
+05/06 08:43:00 PM arch 3 fitness: sotl=-50.000000 sotl_e=-10.000000 early_stop=0.780000 lce_m=0.950000
+"""
+
+
+@pytest.fixture
+def fitness_log(tmp_path):
+    p = tmp_path / "log.txt"
+    p.write_text(FITNESS_LOG)
+    return p
+
+
+def test_scrape_attaches_fitness_scores(fitness_log):
+    result = scrape(fitness_log)
+    assert result["1"]["fitness"] == pytest.approx({
+        "sotl": -123.456, "sotl_e": -45.61,
+        "early_stop": 0.4213, "lce_m": 0.8712,
+    })
+
+
+def test_scrape_without_fitness_lines_has_no_fitness_key(sample_log):
+    result = scrape(sample_log)
+    assert all("fitness" not in v for v in result.values())
+
+
+def test_fitness_metrics_per_method(fitness_log, tmp_path):
+    payload = write_summary(fitness_log, tmp_path / "summary.json")
+    fm = payload["fitness_metrics"]
+    assert set(fm) == {"sotl", "sotl_e", "early_stop", "lce_m"}
+    # All four methods rank the 3 archs in the same order as valid_acc.
+    for method, metrics in fm.items():
+        assert metrics["kendall_tau"] == pytest.approx(1.0), method
+        assert metrics["num_architectures"] == 3
+
+
+def test_payload_shape_unchanged_without_fitness(sample_log, tmp_path):
+    payload = write_summary(sample_log, tmp_path / "summary.json")
+    assert set(payload) == {"architectures", "metrics"}
+
+
+BUDGET_FITNESS_LINES = """\
+05/06 08:37:00 PM Network id = 1
+05/06 08:37:10 PM Architecture = NB201Genotype(arch_str='|none~0|+|none~0|none~1|+|none~0|none~1|none~2|')
+05/06 08:37:20 PM param size = 0.1MB
+05/06 08:37:30 PM flops = 1.0
+05/06 08:38:00 PM arch 1: valid_acc=61.2000 pred_acc=0.8412
+05/06 08:38:00 PM arch 1 fitness: sotl@1=-32.100000 sotl@5=-123.456000 nap2@1=0.812300 nap2@5=0.841200 synflow=1.5e+30
+"""
+
+
+def test_scrape_budget_suffixed_fitness_keys(tmp_path):
+    log = tmp_path / "log.txt"
+    log.write_text(BUDGET_FITNESS_LINES)
+    from misc.log_summary import scrape
+    arch = scrape(log)["1"]
+    assert arch["fitness"] == {
+        "sotl@1": -32.1, "sotl@5": -123.456,
+        "nap2@1": 0.8123, "nap2@5": 0.8412,
+        "synflow": 1.5e+30,
+    }

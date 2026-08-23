@@ -9,6 +9,12 @@ pymoo==0.3.0
 pymop==0.2.4          # pymoo 0.3.0 imports from pymop
 numpy<1.24            # pymoo 0.3.0 uses np.float / np.int (removed in 1.24)
 graphviz>=0.20        # used by visualization/{macro,micro}_visualize.py
+scipy                 # fitness/lce.py (LCE-m) + nap2.training.evaluate metrics
+
+# Learning-curve fitness baselines (--fitness): lcpfn is vendored at ./lcpfn
+# (its PyPI package pins torch<=1.11; we run torch 2.x — see lcpfn/VENDORED.md).
+# LC-PFN's ~100 MB checkpoint is fetched separately into gitignored
+# trained_models/lcpfn/ via scripts/fetch_lcpfn_checkpoint.sh.
 
 # Performance predictor used in evolution_search when --use_nap2 is passed.
 # nap2 is vendored at ./NAPv2/ and installed editable, separately from this file:

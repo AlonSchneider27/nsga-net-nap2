@@ -33,6 +33,9 @@ NAP2_AE_GRADIENTS_PT   = ''
 NAP2_AE_GRADIENTS_JSON = ''   # same, for the gradients AE
 NAP2_LSTM_PT           = ''
 NAP2_LSTM_JSON         = ''   # predictor hyperparams; carries 'predictor_type' (lstm|bigru)
+# LC-PFN pretrained checkpoint (see scripts/fetch_lcpfn_checkpoint.sh).
+# Required when --fitness includes lc_pfn; --lcpfn_ckpt overrides.
+LCPFN_CKPT             = ''
 
 parser = argparse.ArgumentParser("Multi-objetive Genetic Algorithm for NAS")
 parser.add_argument('--save', type=str, default='GA-BiObj', help='experiment name')
@@ -88,6 +91,31 @@ parser.add_argument('--nap2_max_steps', type=int, default=0,
                          'cifar10_via_log_cifar10.pkl, [15625 x 5 x 256]), so a plain '
                          '[steps, 256] sequence is the in-distribution input. Only set this '
                          'if a future predictor is trained on longer padded sequences.')
+parser.add_argument('--fitness', type=str, default='',
+                    help='comma-separated fitness methods to score and log per architecture: '
+                         'any of nap2,synflow,grad_norm,snip,sotl,sotl_e,early_stop,lce_m,lc_pfn, '
+                         'or "all" for the eight baselines (add nap2 with "all,nap2"). Scores are '
+                         'shadow-logged for post-hoc Kendall-tau comparison; the GA objectives '
+                         'stay 100-valid_acc and flops. Learning-curve methods share one '
+                         'partial-training run at the --nap2_steps budget; zero-cost proxies '
+                         '(synflow/grad_norm/snip) score at initialization, budget-free.')
+parser.add_argument('--nap2_steps_list', type=str, default='',
+                    help='comma-separated snapshot budgets, e.g. "1,3,5,10,15". ONE '
+                         'partial-training run per architecture at max(list); every '
+                         'fitness method AND nap2 are then scored at each budget from '
+                         'prefixes of that run, logged with @budget-suffixed keys '
+                         '(sotl@3=..., nap2@15=...) so summary.json reports KT per '
+                         '(method, budget). Zero-cost proxies stay budget-free (plain '
+                         'keys). Empty (default) = single budget from --nap2_steps '
+                         'with plain keys, exactly as before.')
+parser.add_argument('--lcpfn_ckpt', type=str, default='',
+                    help='path to the LC-PFN pretrained checkpoint '
+                         '(scripts/fetch_lcpfn_checkpoint.sh; required when --fitness '
+                         'includes lc_pfn). Overrides the LCPFN_CKPT module constant.')
+parser.add_argument('--lc_target_epochs', type=int, default=0,
+                    help='epoch horizon lce_m/lc_pfn extrapolate the val-acc curve to. '
+                         'Default 0 = use --epochs (the horizon the summary KT is computed '
+                         'against); set 200 for the NB201 full-training horizon.')
 args = parser.parse_args()
 
 log_format = '%(asctime)s %(message)s'
@@ -104,7 +132,8 @@ class NAS(Problem):
     # first define the NAS problem (inherit from pymop)
     def __init__(self, search_space='micro', n_var=20, n_obj=1, n_constr=0, lb=None, ub=None,
                  init_channels=24, layers=8, epochs=25, save_dir=None, predictor=None,
-                 dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0):
+                 dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0,
+                 fitness_scorers=None, nap2_steps_list=None):
         super().__init__(n_var=n_var, n_obj=n_obj, n_constr=n_constr, type_var=np.int)
         self.xl = lb
         self.xu = ub
@@ -118,6 +147,13 @@ class NAS(Problem):
         self._data = data
         self._nap2_steps = nap2_steps
         self._nap2_max_steps = nap2_max_steps
+        self._fitness_scorers = fitness_scorers
+        self._nap2_steps_list = nap2_steps_list
+        # Genome-keyed cache: pymoo dedups offspring within a generation but
+        # re-samples across generations, and every re-evaluation costs a full
+        # proxy training. Budget and method set are constant within a run, so
+        # caching the whole performance dict is safe.
+        self._perf_cache = {}
         self._n_evaluated = 0  # keep track of how many architectures are sampled
 
     def _evaluate(self, x, out, *args, **kwargs):
@@ -136,18 +172,32 @@ class NAS(Problem):
                 genome = macro_encoding.convert(x[i, :])
             elif self._search_space == 'nb201':
                 genome = nb201_encoding.convert(x[i, :])
-            performance = train_search.main(genome=genome,
-                                            search_space=self._search_space,
-                                            init_channels=self._init_channels,
-                                            layers=self._layers, cutout=False,
-                                            epochs=self._epochs,
-                                            save='arch_{}'.format(arch_id),
-                                            expr_root=self._save_dir,
-                                            predictor=self._predictor,
-                                            dataset=self._dataset,
-                                            data=self._data,
-                                            nap2_steps=self._nap2_steps,
-                                            nap2_max_steps=self._nap2_max_steps)
+            cache_key = str(genome)
+            cached = self._perf_cache.get(cache_key)
+            if cached is not None:
+                performance = cached
+                # Re-log the scrapeable per-arch lines so this arch_id still
+                # appears fully in summary.json.
+                logging.info('arch %d: cache hit (genome already evaluated)', arch_id)
+                logging.info("Architecture = %s", performance['genotype'])
+                logging.info("param size = %fMB", performance['params'])
+                logging.info('flops = %f', performance['flops'])
+            else:
+                performance = train_search.main(genome=genome,
+                                                search_space=self._search_space,
+                                                init_channels=self._init_channels,
+                                                layers=self._layers, cutout=False,
+                                                epochs=self._epochs,
+                                                save='arch_{}'.format(arch_id),
+                                                expr_root=self._save_dir,
+                                                predictor=self._predictor,
+                                                dataset=self._dataset,
+                                                data=self._data,
+                                                nap2_steps=self._nap2_steps,
+                                                nap2_max_steps=self._nap2_max_steps,
+                                                fitness_scorers=self._fitness_scorers,
+                                                nap2_steps_list=self._nap2_steps_list)
+                self._perf_cache[cache_key] = performance
 
             # all objectives assume to be MINIMIZED !!!!!
             objs[i, 0] = 100 - performance['valid_acc']
@@ -156,6 +206,13 @@ class NAS(Problem):
             pred_acc = performance.get('pred_acc')
             pred_str = '{:.4f}'.format(pred_acc) if pred_acc is not None else 'n/a'
             logging.info('arch %d: valid_acc=%.4f pred_acc=%s', arch_id, performance['valid_acc'], pred_str)
+
+            fitness_scores = performance.get('fitness_scores')
+            if fitness_scores:
+                pairs = ' '.join('{}={:.6f}'.format(k, v)
+                                 for k, v in fitness_scores.items() if v is not None)
+                if pairs:
+                    logging.info('arch %d fitness: %s', arch_id, pairs)
 
             self._n_evaluated += 1
 
@@ -277,8 +334,40 @@ def main():
     np.random.seed(args.seed)
     logging.info("args = %s", args)
 
+    # Parse --fitness: expand 'all' to the five baselines; 'nap2' routes to
+    # the existing predictor path (identical to --use_nap2).
+    import fitness as fitness_pkg
+    tokens = [t for t in (s.strip() for s in args.fitness.split(',')) if t]
+    expanded = []
+    for t in tokens:
+        expanded.extend(fitness_pkg.ALL_BASELINES if t == 'all' else [t])
+    wants_nap2 = args.use_nap2 or 'nap2' in expanded
+    baseline_names = [t for t in expanded if t != 'nap2']
+
+    fitness_scorers = None
+    if baseline_names:
+        fitness_scorers = fitness_pkg.build_scorers(
+            ','.join(baseline_names),
+            lcpfn_ckpt=args.lcpfn_ckpt or LCPFN_CKPT,
+            target_epochs=args.lc_target_epochs or args.epochs)
+        logging.info('fitness baselines enabled: %s (lc target horizon: %d epochs)',
+                     [s.name for s in fitness_scorers],
+                     args.lc_target_epochs or args.epochs)
+
+    # Parse --nap2_steps_list into sorted unique positive ints (or None).
+    nap2_steps_list = None
+    if args.nap2_steps_list:
+        nap2_steps_list = sorted({int(s) for s in args.nap2_steps_list.split(',')
+                                  if s.strip()})
+        if not nap2_steps_list or any(k < 1 for k in nap2_steps_list):
+            raise ValueError(f'--nap2_steps_list must be positive ints, '
+                             f'got {args.nap2_steps_list!r}')
+        logging.info('budget list enabled: %s snapshots (partial train at %d, '
+                     'all methods scored per budget from prefixes)',
+                     nap2_steps_list, nap2_steps_list[-1])
+
     predictor = None
-    if args.use_nap2:
+    if wants_nap2:
         paths = _resolve_nap2_paths(args)
         predictor = _load_nap2_predictor(paths)
         logging.info("nap2 predictor loaded (lstm=%s, ae_w=%s, ae_g=%s)",
@@ -325,7 +414,9 @@ def main():
                   predictor=predictor, dataset=args.dataset,
                   data=args.data,
                   nap2_steps=args.nap2_steps,
-                  nap2_max_steps=args.nap2_max_steps)
+                  nap2_max_steps=args.nap2_max_steps,
+                  fitness_scorers=fitness_scorers,
+                  nap2_steps_list=nap2_steps_list)
 
     # configure the nsga-net method
     method = engine.nsganet(pop_size=args.pop_size,
