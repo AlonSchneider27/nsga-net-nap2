@@ -349,3 +349,14 @@ def test_write_summary_tolerates_bad_bytes_in_log(tmp_path):
     payload = write_summary(log, tmp_path / "s.json")
     assert payload["objective_method"] == "sotl_e"
     assert len(payload["architectures"]) == 1
+
+
+def test_scrape_epoch_native_keys(tmp_path):
+    log = tmp_path / "log.txt"
+    log.write_text(BUDGET_FITNESS_LINES.replace(
+        "sotl@1=-32.100000 sotl@5=-123.456000",
+        "sotl@e1=-32.100000 sotl_e@e20=-3.500000"))
+    from misc.log_summary import scrape
+    fit = scrape(log)["1"]["fitness"]
+    assert fit["sotl@e1"] == -32.1
+    assert fit["sotl_e@e20"] == -3.5

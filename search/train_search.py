@@ -76,7 +76,7 @@ def main(genome, epochs, search_space='micro',
          save='Design_1', expr_root='search', seed=0, gpu=0, init_channels=24,
          layers=11, auxiliary=False, cutout=False, drop_path_prob=0.0, predictor=None,
          dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0,
-         fitness_scorers=None, nap2_steps_list=None):
+         fitness_scorers=None, nap2_steps_list=None, lc_cadence='snapshot'):
 
     # ---- train logger ----------------- #
     save_pth = os.path.join(expr_root, '{}'.format(save))
@@ -334,7 +334,12 @@ def main(genome, epochs, search_space='micro',
         # Learning-curve baselines (SoTL, SoTL-E, Early-Stop, LCE-m, LC-PFN):
         # one shared partial-training run at the same budget nap2 scores at,
         # on a throwaway copy so the real training below starts fresh.
-        if trace_scorers:
+        # Epoch-native cadence: the LC methods' signals come from the REAL
+        # training loop below (per-epoch loss sums + one val pass per epoch),
+        # not from a snapshot partial-train — scoring happens after training.
+        if trace_scorers and lc_cadence == 'epoch':
+            pass
+        elif trace_scorers:
             try:
                 from fitness.trace import prefix_trace, run_partial_train
                 from nap2.predictor import DEFAULT_TRAINING_CONFIG
@@ -379,13 +384,37 @@ def main(genome, epochs, search_space='micro',
             except Exception:
                 logging.exception('fitness baseline partial training failed')
 
+    epoch_native_lc = []
+    if lc_cadence == 'epoch':
+        epoch_native_lc = [s for s in (fitness_scorers or [])
+                           if not getattr(s, 'needs_init_model', False)]
+    epoch_need_val = any(s.needs_val_curve or s.needs_final_val
+                         for s in epoch_native_lc)
+    epoch_loss_sums = []
+    epoch_val_accs = []
+
     for epoch in range(epochs):
         scheduler.step()
         logging.info('epoch %d lr %e', epoch, scheduler.get_lr()[0])
         model.droprate = drop_path_prob * epoch / epochs
 
-        train_acc, train_obj = train(train_queue, model, criterion, optimizer, train_params)
+        train_acc, train_obj, epoch_loss_sum = train(train_queue, model, criterion, optimizer, train_params)
         logging.info('train_acc %f', train_acc)
+
+        if epoch_native_lc:
+            epoch_loss_sums.append(epoch_loss_sum)
+            if epoch_need_val:
+                ev_acc, _ = infer(valid_queue, model, criterion)
+                epoch_val_accs.append(ev_acc / 100.0)
+                logging.info('epoch %d val_acc %f', epoch, ev_acc)
+
+    if epoch_native_lc and epoch_loss_sums:
+        from fitness.trace import epoch_native_scores
+        fitness_scores = fitness_scores if fitness_scores is not None else {}
+        fitness_scores.update(epoch_native_scores(
+            epoch_native_lc, epoch_loss_sums, epoch_val_accs))
+        logging.info('epoch-native fitness scored: %d methods x %d epochs',
+                     len(epoch_native_lc), len(epoch_loss_sums))
 
     valid_acc, valid_obj = infer(valid_queue, model, criterion)
     logging.info('valid_acc %f', valid_acc)
@@ -490,7 +519,10 @@ def train(train_queue, net, criterion, optimizer, params):
     #
     # logging.info('train acc %f', 100. * correct / total)
 
-    return 100.*correct/total, train_loss/total
+    # train_loss is the SUM of per-minibatch CE losses over the epoch — the
+    # native SoTL-E epoch value (Ru et al.); returned raw for epoch-cadence
+    # fitness scoring alongside the historical per-sample average.
+    return 100.*correct/total, train_loss/total, train_loss
 
 
 # def infer(valid_queue, model, criterion):

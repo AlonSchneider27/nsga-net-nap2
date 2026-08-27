@@ -116,6 +116,18 @@ parser.add_argument('--lc_target_epochs', type=int, default=0,
                     help='epoch horizon lce_m/lc_pfn extrapolate the val-acc curve to. '
                          'Default 0 = use --epochs (the horizon the summary KT is computed '
                          'against); set 200 for the NB201 full-training horizon.')
+parser.add_argument('--lc_cadence', type=str, default='snapshot',
+                    choices=['snapshot', 'epoch'],
+                    help='sampling cadence for the 5 learning-curve methods. '
+                         '"snapshot" (default) = one observation per 100 '
+                         'mini-batches from a shared partial-training run '
+                         '(the paper-table axis). "epoch" = NATIVE cadence: '
+                         'signals read from the real proxy training loop '
+                         '(per-epoch loss sums + one val pass per epoch), '
+                         'keys logged as name@e<K> for every epoch K; '
+                         'requires --epochs > 0. nap2 (100-mb snapshots) and '
+                         'zero-cost proxies (at-init) keep their own native '
+                         'cadence either way.')
 parser.add_argument('--fitness_objective', type=str, default='',
                     help='single fitness method whose score REPLACES the accuracy '
                          'objective: objs[0] = -score (higher=better; pymoo minimizes). '
@@ -166,7 +178,8 @@ class NAS(Problem):
     def __init__(self, search_space='micro', n_var=20, n_obj=1, n_constr=0, lb=None, ub=None,
                  init_channels=24, layers=8, epochs=25, save_dir=None, predictor=None,
                  dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0,
-                 fitness_scorers=None, nap2_steps_list=None, fitness_objective=''):
+                 fitness_scorers=None, nap2_steps_list=None, fitness_objective='',
+                 lc_cadence='snapshot'):
         super().__init__(n_var=n_var, n_obj=n_obj, n_constr=n_constr, type_var=np.int)
         self.xl = lb
         self.xu = ub
@@ -183,6 +196,7 @@ class NAS(Problem):
         self._fitness_scorers = fitness_scorers
         self._nap2_steps_list = nap2_steps_list
         self._fitness_objective = fitness_objective
+        self._lc_cadence = lc_cadence
         # Genome-keyed cache: pymoo dedups offspring within a generation but
         # re-samples across generations, and every re-evaluation costs a full
         # proxy training. Budget and method set are constant within a run, so
@@ -230,7 +244,8 @@ class NAS(Problem):
                                                 nap2_steps=self._nap2_steps,
                                                 nap2_max_steps=self._nap2_max_steps,
                                                 fitness_scorers=self._fitness_scorers,
-                                                nap2_steps_list=self._nap2_steps_list)
+                                                nap2_steps_list=self._nap2_steps_list,
+                                                lc_cadence=self._lc_cadence)
                 # Guided mode: don't cache a result whose guiding score
                 # failed — caching it would turn a transient failure (OOM,
                 # predictor exception) into a permanent penalty against that
@@ -443,6 +458,18 @@ def main():
     expanded = []
     for t in tokens:
         expanded.extend(fitness_pkg.ALL_BASELINES if t == 'all' else [t])
+    LC_METHODS = {'sotl', 'sotl_e', 'early_stop', 'lce_m', 'lc_pfn'}
+    if args.lc_cadence == 'epoch':
+        if args.epochs == 0 and any(t in LC_METHODS for t in expanded):
+            raise ValueError('--lc_cadence epoch reads signals from the real '
+                             'training loop and needs --epochs > 0')
+        if args.fitness_objective in LC_METHODS:
+            raise ValueError('--fitness_objective with an LC method requires '
+                             'the snapshot cadence (epoch-native scores are '
+                             'shadow-logged only)')
+        logging.info('lc_cadence = epoch (native: LC signals from the real '
+                     'training loop, keys name@e<K>)')
+
     if args.fitness_objective:
         valid = set(fitness_pkg.ALL_BASELINES) | {'nap2'}
         if args.fitness_objective not in valid:
@@ -541,7 +568,8 @@ def main():
                   nap2_max_steps=args.nap2_max_steps,
                   fitness_scorers=fitness_scorers,
                   nap2_steps_list=nap2_steps_list,
-                  fitness_objective=args.fitness_objective)
+                  fitness_objective=args.fitness_objective,
+                  lc_cadence=args.lc_cadence)
 
     # configure the nsga-net method
     method = engine.nsganet(pop_size=args.pop_size,
