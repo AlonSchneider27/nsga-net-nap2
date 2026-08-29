@@ -76,7 +76,8 @@ def main(genome, epochs, search_space='micro',
          save='Design_1', expr_root='search', seed=0, gpu=0, init_channels=24,
          layers=11, auxiliary=False, cutout=False, drop_path_prob=0.0, predictor=None,
          dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0,
-         fitness_scorers=None, nap2_steps_list=None, lc_cadence='snapshot'):
+         fitness_scorers=None, nap2_steps_list=None, lc_cadence='snapshot',
+         lc_epoch_cap=0):
 
     # ---- train logger ----------------- #
     save_pth = os.path.join(expr_root, '{}'.format(save))
@@ -398,10 +399,17 @@ def main(genome, epochs, search_space='micro',
         logging.info('epoch %d lr %e', epoch, scheduler.get_lr()[0])
         model.droprate = drop_path_prob * epoch / epochs
 
+        t_epoch = time.time()
         train_acc, train_obj, epoch_loss_sum = train(train_queue, model, criterion, optimizer, train_params)
+        # Explicit wall time so seconds-per-minibatch = train_time / len(train_queue)
+        # is directly scrapeable (val-pass time deliberately excluded).
+        logging.info('epoch %d train_time %.1fs', epoch, time.time() - t_epoch)
         logging.info('train_acc %f', train_acc)
 
-        if epoch_native_lc:
+        # LC methods observe only up to lc_epoch_cap epochs (0 = all): enough
+        # to cover the mini-batch budget grid; later epochs train as usual for
+        # valid_acc / GA guidance with no method overhead.
+        if epoch_native_lc and (not lc_epoch_cap or epoch < lc_epoch_cap):
             epoch_loss_sums.append(epoch_loss_sum)
             if epoch_need_val:
                 ev_acc, _ = infer(valid_queue, model, criterion)
