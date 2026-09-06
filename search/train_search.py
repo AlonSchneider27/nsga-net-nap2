@@ -219,8 +219,11 @@ def main(genome, epochs, search_space='micro',
     # indices = list(range(num_train))
     # split = int(np.floor(train_portion * num_train))
 
+    # shuffle=True: NB201's training protocol (and nap2's own snapshot
+    # trainer) reshuffle every epoch; a fixed batch order every epoch was a
+    # protocol deviation for the proxy training and the LC curves it feeds.
     train_queue = torch.utils.data.DataLoader(
-        train_data, batch_size=batch_size,
+        train_data, batch_size=batch_size, shuffle=True,
         # sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[:split]),
         pin_memory=True, num_workers=4)
 
@@ -255,6 +258,7 @@ def main(genome, epochs, search_space='micro',
             # it per epoch but we score before training starts.
             score_model.droprate = 0.0
             score_model = _LogitsOnly(score_model)
+            t_nap2 = time.time()
             if nap2_steps_list:
                 # Budget-list mode: ONE snapshot collection at the largest
                 # budget, then predict every prefix (per-budget padding
@@ -270,15 +274,16 @@ def main(genome, epochs, search_space='micro',
                         seq = torch.cat([seq, pad], dim=0)
                     nap2_budget_preds[k] = float(predictor._lstm.predict(seq))
                 pred_acc = nap2_budget_preds[max(nap2_steps_list)]
-                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s; budgets %s)',
+                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s; budgets %s; t_nap2=%.1fs)',
                              pred_acc, max(nap2_steps_list), nap2_max_steps,
                              ' '.join(f'@{k}={v:.4f}'
-                                      for k, v in sorted(nap2_budget_preds.items())))
+                                      for k, v in sorted(nap2_budget_preds.items())),
+                             time.time() - t_nap2)
             else:
                 pred_acc = float(predictor.score(score_model, train_queue, steps=nap2_steps,
                                                  max_steps=nap2_max_steps))
-                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s)',
-                             pred_acc, nap2_steps, nap2_max_steps)
+                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s; t_nap2=%.1fs)',
+                             pred_acc, nap2_steps, nap2_max_steps, time.time() - t_nap2)
             del score_model
         except Exception:
             logging.exception('nap2 prediction failed')
@@ -412,9 +417,11 @@ def main(genome, epochs, search_space='micro',
         if epoch_native_lc and (not lc_epoch_cap or epoch < lc_epoch_cap):
             epoch_loss_sums.append(epoch_loss_sum)
             if epoch_need_val:
+                t_val = time.time()
                 ev_acc, _ = infer(valid_queue, model, criterion)
                 epoch_val_accs.append(ev_acc / 100.0)
-                logging.info('epoch %d val_acc %f', epoch, ev_acc)
+                logging.info('epoch %d val_acc %f (val_time %.1fs)', epoch, ev_acc,
+                             time.time() - t_val)
 
     if epoch_native_lc and epoch_loss_sums:
         from fitness.trace import epoch_native_scores
