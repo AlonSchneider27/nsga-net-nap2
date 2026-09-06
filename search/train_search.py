@@ -534,9 +534,10 @@ def train(train_queue, net, criterion, optimizer, params):
     #
     # logging.info('train acc %f', 100. * correct / total)
 
-    # train_loss is the SUM of per-minibatch CE losses over the epoch — the
-    # native SoTL-E epoch value (Ru et al.); returned raw for epoch-cadence
-    # fitness scoring alongside the historical per-sample average.
+    # train_loss is the SUM of per-minibatch CE losses over the epoch,
+    # returned raw for epoch-cadence fitness scoring (SoTL/SoTL-E). Ru et al.
+    # eq. (1) and NB201's per-epoch 'train_losses' are per-epoch MEANS; with
+    # a fixed minibatch count per epoch the sum is rank-equivalent.
     return 100.*correct/total, train_loss/total, train_loss
 
 
