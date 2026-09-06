@@ -76,7 +76,8 @@ def main(genome, epochs, search_space='micro',
          save='Design_1', expr_root='search', seed=0, gpu=0, init_channels=24,
          layers=11, auxiliary=False, cutout=False, drop_path_prob=0.0, predictor=None,
          dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0,
-         fitness_scorers=None, nap2_steps_list=None):
+         fitness_scorers=None, nap2_steps_list=None, lc_cadence='snapshot',
+         lc_epoch_cap=0):
 
     # ---- train logger ----------------- #
     save_pth = os.path.join(expr_root, '{}'.format(save))
@@ -170,6 +171,11 @@ def main(genome, epochs, search_space='micro',
     else:
         raise NameError('Unknown search space type')
 
+    # NetworkCIFAR.forward reads self.droprate; the epoch loop below only
+    # sets it when epochs > 0, but infer()/flops still run the forward pass
+    # (--epochs 0 guided runs). Harmless for macro/nb201.
+    model.droprate = 0.0
+
     # logging.info("Genome = %s", genome)
     logging.info("Architecture = %s", genotype)
 
@@ -213,8 +219,11 @@ def main(genome, epochs, search_space='micro',
     # indices = list(range(num_train))
     # split = int(np.floor(train_portion * num_train))
 
+    # shuffle=True: NB201's training protocol (and nap2's own snapshot
+    # trainer) reshuffle every epoch; a fixed batch order every epoch was a
+    # protocol deviation for the proxy training and the LC curves it feeds.
     train_queue = torch.utils.data.DataLoader(
-        train_data, batch_size=batch_size,
+        train_data, batch_size=batch_size, shuffle=True,
         # sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[:split]),
         pin_memory=True, num_workers=4)
 
@@ -238,12 +247,18 @@ def main(genome, epochs, search_space='micro',
             # to CPU because nap2's float64 AE + MPS produces NNPack dtype
             # mismatches; on CUDA/CPU, score on the same device as training.
             score_model = copy.deepcopy(model)
-            if device == 'mps':
+            # Historically nap2 scoring dropped to CPU on MPS (float64 AE
+            # pipeline). The partial-training stage itself is float32 and the
+            # snapshot collector syncs + moves captures to CPU, so MPS partial
+            # training is allowed via env opt-in (validated against CPU
+            # reference scores before use).
+            if device == 'mps' and not os.environ.get('NAP2_SCORE_ON_MPS'):
                 score_model = score_model.cpu()
             # NetworkCIFAR.forward reads self.droprate; the training loop sets
             # it per epoch but we score before training starts.
             score_model.droprate = 0.0
             score_model = _LogitsOnly(score_model)
+            t_nap2 = time.time()
             if nap2_steps_list:
                 # Budget-list mode: ONE snapshot collection at the largest
                 # budget, then predict every prefix (per-budget padding
@@ -259,15 +274,16 @@ def main(genome, epochs, search_space='micro',
                         seq = torch.cat([seq, pad], dim=0)
                     nap2_budget_preds[k] = float(predictor._lstm.predict(seq))
                 pred_acc = nap2_budget_preds[max(nap2_steps_list)]
-                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s; budgets %s)',
+                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s; budgets %s; t_nap2=%.1fs)',
                              pred_acc, max(nap2_steps_list), nap2_max_steps,
                              ' '.join(f'@{k}={v:.4f}'
-                                      for k, v in sorted(nap2_budget_preds.items())))
+                                      for k, v in sorted(nap2_budget_preds.items())),
+                             time.time() - t_nap2)
             else:
                 pred_acc = float(predictor.score(score_model, train_queue, steps=nap2_steps,
                                                  max_steps=nap2_max_steps))
-                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s)',
-                             pred_acc, nap2_steps, nap2_max_steps)
+                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s; t_nap2=%.1fs)',
+                             pred_acc, nap2_steps, nap2_max_steps, time.time() - t_nap2)
             del score_model
         except Exception:
             logging.exception('nap2 prediction failed')
@@ -324,7 +340,12 @@ def main(genome, epochs, search_space='micro',
         # Learning-curve baselines (SoTL, SoTL-E, Early-Stop, LCE-m, LC-PFN):
         # one shared partial-training run at the same budget nap2 scores at,
         # on a throwaway copy so the real training below starts fresh.
-        if trace_scorers:
+        # Epoch-native cadence: the LC methods' signals come from the REAL
+        # training loop below (per-epoch loss sums + one val pass per epoch),
+        # not from a snapshot partial-train — scoring happens after training.
+        if trace_scorers and lc_cadence == 'epoch':
+            pass
+        elif trace_scorers:
             try:
                 from fitness.trace import prefix_trace, run_partial_train
                 from nap2.predictor import DEFAULT_TRAINING_CONFIG
@@ -369,13 +390,46 @@ def main(genome, epochs, search_space='micro',
             except Exception:
                 logging.exception('fitness baseline partial training failed')
 
+    epoch_native_lc = []
+    if lc_cadence == 'epoch':
+        epoch_native_lc = [s for s in (fitness_scorers or [])
+                           if not getattr(s, 'needs_init_model', False)]
+    epoch_need_val = any(s.needs_val_curve or s.needs_final_val
+                         for s in epoch_native_lc)
+    epoch_loss_sums = []
+    epoch_val_accs = []
+
     for epoch in range(epochs):
         scheduler.step()
         logging.info('epoch %d lr %e', epoch, scheduler.get_lr()[0])
         model.droprate = drop_path_prob * epoch / epochs
 
-        train_acc, train_obj = train(train_queue, model, criterion, optimizer, train_params)
+        t_epoch = time.time()
+        train_acc, train_obj, epoch_loss_sum = train(train_queue, model, criterion, optimizer, train_params)
+        # Explicit wall time so seconds-per-minibatch = train_time / len(train_queue)
+        # is directly scrapeable (val-pass time deliberately excluded).
+        logging.info('epoch %d train_time %.1fs', epoch, time.time() - t_epoch)
         logging.info('train_acc %f', train_acc)
+
+        # LC methods observe only up to lc_epoch_cap epochs (0 = all): enough
+        # to cover the mini-batch budget grid; later epochs train as usual for
+        # valid_acc / GA guidance with no method overhead.
+        if epoch_native_lc and (not lc_epoch_cap or epoch < lc_epoch_cap):
+            epoch_loss_sums.append(epoch_loss_sum)
+            if epoch_need_val:
+                t_val = time.time()
+                ev_acc, _ = infer(valid_queue, model, criterion)
+                epoch_val_accs.append(ev_acc / 100.0)
+                logging.info('epoch %d val_acc %f (val_time %.1fs)', epoch, ev_acc,
+                             time.time() - t_val)
+
+    if epoch_native_lc and epoch_loss_sums:
+        from fitness.trace import epoch_native_scores
+        fitness_scores = fitness_scores if fitness_scores is not None else {}
+        fitness_scores.update(epoch_native_scores(
+            epoch_native_lc, epoch_loss_sums, epoch_val_accs))
+        logging.info('epoch-native fitness scored: %d methods x %d epochs',
+                     len(epoch_native_lc), len(epoch_loss_sums))
 
     valid_acc, valid_obj = infer(valid_queue, model, criterion)
     logging.info('valid_acc %f', valid_acc)
@@ -480,7 +534,11 @@ def train(train_queue, net, criterion, optimizer, params):
     #
     # logging.info('train acc %f', 100. * correct / total)
 
-    return 100.*correct/total, train_loss/total
+    # train_loss is the SUM of per-minibatch CE losses over the epoch,
+    # returned raw for epoch-cadence fitness scoring (SoTL/SoTL-E). Ru et al.
+    # eq. (1) and NB201's per-epoch 'train_losses' are per-epoch MEANS; with
+    # a fixed minibatch count per epoch the sum is rank-equivalent.
+    return 100.*correct/total, train_loss/total, train_loss
 
 
 # def infer(valid_queue, model, criterion):
