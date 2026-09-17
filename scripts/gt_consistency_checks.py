@@ -47,11 +47,20 @@ RUNS = [  # tag, label, target dataset, predictor source
 DS_SHORT = {'cifar10': 'c10', 'cifar100': 'c100', 'ImageNet16-120': 'in16'}
 GT200_FIELD = {'cifar10': 'cifar10_test', 'cifar100': 'cifar100_test',
                'ImageNet16-120': 'imagenet16_test'}
-# NB-201 epoch-GT column per target dataset -> (prefix for valid split, prefix for test split).
-# cifar10: valid = the 'cifar10-valid' run (25k/25k, x-valid); test = the 'cifar10' run (50k, ori-test).
-EPOCH_PREFIX = {'cifar10': ('c10v_valid', 'c10_test'),
-                'cifar100': ('c100_valid', 'c100_test'),
-                'ImageNet16-120': ('in16_valid', 'in16_test')}
+# NB-201 epoch-GT field per (target dataset, column). The .pth evaluates x-valid /
+# x-test at EVERY epoch only for cifar10-valid (x-valid) and cifar10 (ori-test);
+# for cifar100 / ImageNet16-120 the per-epoch series is ori-test (= x-valid u
+# x-test, the full 10k / 6k held-out set), while x-valid / x-test exist only at
+# epoch 200. So for those two datasets the epoch-20 column is the ori-test
+# ('valtest') accuracy and nb_test20 is unavailable.
+EPOCH_FIELD = {
+    'cifar10': {'nb_valid20': 'c10v_valid_ep20', 'nb_valid200': 'c10v_valid_ep200',
+                'nb_test20': 'c10_test_ep20', 'nb_test200': 'c10_test_ep200'},
+    'cifar100': {'nb_valid20': 'c100_valtest_ep20', 'nb_valid200': 'c100_valid_ep200',
+                 'nb_test20': None, 'nb_test200': 'c100_test_ep200'},
+    'ImageNet16-120': {'nb_valid20': 'in16_valtest_ep20', 'nb_valid200': 'in16_valid_ep200',
+                       'nb_test20': None, 'nb_test200': 'in16_test_ep200'},
+}
 NB_COLS = ['nb_valid20', 'nb_test20', 'nb_valid200', 'nb_test200']
 BASE_COLS = ['ours20'] + NB_COLS + ['gt200_naslib']
 NAP2_COLS = [f'nap2@{k}' for k in NAP2_BUDGETS]
@@ -103,7 +112,7 @@ def load_run(path):
 
 
 def attach_gt(rows, ds, epoch_gt, gt):
-    vp, tp = EPOCH_PREFIX[ds]
+    fields = EPOCH_FIELD[ds]
     missing = 0
     for arch, r in rows.items():
         g = gt.get(arch)
@@ -114,10 +123,8 @@ def attach_gt(rows, ds, epoch_gt, gt):
             for c in NB_COLS:
                 r[c] = None
             continue
-        r['nb_valid20'] = e.get(f'{vp}_ep20')
-        r['nb_valid200'] = e.get(f'{vp}_ep200')
-        r['nb_test20'] = e.get(f'{tp}_ep20')
-        r['nb_test200'] = e.get(f'{tp}_ep200')
+        for c in NB_COLS:
+            r[c] = e.get(fields[c]) if fields[c] else None
     return missing
 
 
@@ -271,9 +278,8 @@ def main(argv=None):
     # full space: NB-201 epoch-20 vs epoch-200 over all 15,625 archs
     full = []
     if have_epoch:
-        for ds, (vp, tp) in EPOCH_PREFIX.items():
-            fr = {a: {'nb_valid20': e.get(f'{vp}_ep20'), 'nb_valid200': e.get(f'{vp}_ep200'),
-                      'nb_test20': e.get(f'{tp}_ep20'), 'nb_test200': e.get(f'{tp}_ep200'),
+        for ds, fields in EPOCH_FIELD.items():
+            fr = {a: {**{c: (e.get(fields[c]) if fields[c] else None) for c in NB_COLS},
                       'gt200_naslib': gt.get(a, {}).get(GT200_FIELD[ds])}
                   for a, e in epoch_gt.items()}
             row = {'dataset': ds, 'n': len(fr)}
