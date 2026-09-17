@@ -128,6 +128,10 @@ parser.add_argument('--lc_cadence', type=str, default='snapshot',
                          'requires --epochs > 0. nap2 (100-mb snapshots) and '
                          'zero-cost proxies (at-init) keep their own native '
                          'cadence either way.')
+parser.add_argument('--nap2_snapshot_interval', type=int, default=100,
+                    help='mini-batches of partial training between nap2 snapshots '
+                         '(default 100 = the cadence the BiGRU was trained on). '
+                         'E.g. 75 gives ~2 snapshots per CIFAR epoch (157 mb).')
 parser.add_argument('--lc_epoch_cap', type=int, default=0,
                     help='epoch-cadence only: LC methods observe at most this many '
                          'epochs (0 = all --epochs). Set to ceil(max_mb_budget / '
@@ -185,7 +189,8 @@ class NAS(Problem):
                  init_channels=24, layers=8, epochs=25, save_dir=None, predictor=None,
                  dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0,
                  fitness_scorers=None, nap2_steps_list=None, fitness_objective='',
-                 lc_cadence='snapshot', lc_epoch_cap=0):
+                 lc_cadence='snapshot', lc_epoch_cap=0,
+                 nap2_snapshot_interval=100):
         super().__init__(n_var=n_var, n_obj=n_obj, n_constr=n_constr, type_var=np.int)
         self.xl = lb
         self.xu = ub
@@ -204,6 +209,7 @@ class NAS(Problem):
         self._fitness_objective = fitness_objective
         self._lc_cadence = lc_cadence
         self._lc_epoch_cap = lc_epoch_cap
+        self._nap2_snapshot_interval = nap2_snapshot_interval
         # Genome-keyed cache: pymoo dedups offspring within a generation but
         # re-samples across generations, and every re-evaluation costs a full
         # proxy training. Budget and method set are constant within a run, so
@@ -253,7 +259,8 @@ class NAS(Problem):
                                                 fitness_scorers=self._fitness_scorers,
                                                 nap2_steps_list=self._nap2_steps_list,
                                                 lc_cadence=self._lc_cadence,
-                                                lc_epoch_cap=self._lc_epoch_cap)
+                                                lc_epoch_cap=self._lc_epoch_cap,
+                                                nap2_snapshot_interval=self._nap2_snapshot_interval)
                 # Guided mode: don't cache a result whose guiding score
                 # failed — caching it would turn a transient failure (OOM,
                 # predictor exception) into a permanent penalty against that
@@ -578,7 +585,8 @@ def main():
                   nap2_steps_list=nap2_steps_list,
                   fitness_objective=args.fitness_objective,
                   lc_cadence=args.lc_cadence,
-                  lc_epoch_cap=args.lc_epoch_cap)
+                  lc_epoch_cap=args.lc_epoch_cap,
+                  nap2_snapshot_interval=args.nap2_snapshot_interval)
 
     # configure the nsga-net method
     method = engine.nsganet(pop_size=args.pop_size,

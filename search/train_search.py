@@ -77,7 +77,7 @@ def main(genome, epochs, search_space='micro',
          layers=11, auxiliary=False, cutout=False, drop_path_prob=0.0, predictor=None,
          dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0,
          fitness_scorers=None, nap2_steps_list=None, lc_cadence='snapshot',
-         lc_epoch_cap=0):
+         lc_epoch_cap=0, nap2_snapshot_interval=100):
 
     # ---- train logger ----------------- #
     save_pth = os.path.join(expr_root, '{}'.format(save))
@@ -259,12 +259,14 @@ def main(genome, epochs, search_space='micro',
             score_model.droprate = 0.0
             score_model = _LogitsOnly(score_model)
             t_nap2 = time.time()
+            nap2_cfg = {'snapshot_interval': nap2_snapshot_interval}
             if nap2_steps_list:
                 # Budget-list mode: ONE snapshot collection at the largest
                 # budget, then predict every prefix (per-budget padding
                 # semantics identical to a single run at that budget).
                 emb = predictor.get_embeddings(score_model, train_queue,
-                                               steps=max(nap2_steps_list))
+                                               steps=max(nap2_steps_list),
+                                               training_config=nap2_cfg)
                 nap2_budget_preds = {}
                 for k in nap2_steps_list:
                     seq = emb[:k]
@@ -274,16 +276,19 @@ def main(genome, epochs, search_space='micro',
                         seq = torch.cat([seq, pad], dim=0)
                     nap2_budget_preds[k] = float(predictor._lstm.predict(seq))
                 pred_acc = nap2_budget_preds[max(nap2_steps_list)]
-                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s; budgets %s; t_nap2=%.1fs)',
+                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s, interval=%d; budgets %s; t_nap2=%.1fs)',
                              pred_acc, max(nap2_steps_list), nap2_max_steps,
+                             nap2_snapshot_interval,
                              ' '.join(f'@{k}={v:.4f}'
                                       for k, v in sorted(nap2_budget_preds.items())),
                              time.time() - t_nap2)
             else:
                 pred_acc = float(predictor.score(score_model, train_queue, steps=nap2_steps,
-                                                 max_steps=nap2_max_steps))
-                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s; t_nap2=%.1fs)',
-                             pred_acc, nap2_steps, nap2_max_steps, time.time() - t_nap2)
+                                                 max_steps=nap2_max_steps,
+                                                 training_config=nap2_cfg))
+                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s, interval=%d; t_nap2=%.1fs)',
+                             pred_acc, nap2_steps, nap2_max_steps, nap2_snapshot_interval,
+                             time.time() - t_nap2)
             del score_model
         except Exception:
             logging.exception('nap2 prediction failed')
