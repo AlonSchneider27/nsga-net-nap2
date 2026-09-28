@@ -407,7 +407,7 @@ def _load_nap2_predictor(paths):
     """
     import json
     from nap2 import NAP2Predictor
-    from nap2.predictor import resolve_normalize
+    from nap2.predictor import resolve_embedding_order, resolve_normalize
     from nap2.autoencoder import FeatureMapAutoEncoder
     from nap2.lstm_predictor import LSTMPredictor
     from nap2.bigru_predictor import BiGRUDualPredictor
@@ -446,7 +446,21 @@ def _load_nap2_predictor(paths):
     PredictorCls = BiGRUDualPredictor if predictor_type == 'bigru' else LSTMPredictor
     pred = PredictorCls.load(model_path=paths['lstm_pt'], params_path=paths['lstm_json'])
 
-    return NAP2Predictor(ae_weights=ae_w, ae_gradients=ae_g, lstm=pred, normalize=normalize)
+    # Concat order of the two AE embeddings, a property of the predictor
+    # checkpoint (nap2.predictor.EMBEDDING_ORDERS). Default "wg" =
+    # [weights, gradients], the NAPv2 repo order; michael's deployed
+    # checkpoints need "embedding_order": "gw" in their JSON. The wrong
+    # order raises nothing -- predictions collapse to a near-constant value.
+    embedding_order, order_src = resolve_embedding_order(pred_params)
+    logging.info('nap2 embedding order=%s (from %s)', embedding_order, order_src)
+    if embedding_order == 'gw':
+        logging.warning(
+            "nap2: legacy [gradients, weights] embedding order (michael's deployed "
+            "checkpoints). Models trained with the NAPv2 repo must NOT set this."
+        )
+
+    return NAP2Predictor(ae_weights=ae_w, ae_gradients=ae_g, lstm=pred,
+                         normalize=normalize, embedding_order=embedding_order)
 
 
 def main():

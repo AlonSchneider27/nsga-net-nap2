@@ -156,11 +156,14 @@ class BiGRUDualPredictor(nn.Module):
         with open(params_path) as f:
             raw = json.load(f)
 
+        # train_lstm.py writes the LSTM-only keys as null for biGRU runs, so fall back only on
+        # missing/null (the eager `raw.get(..., [128])[0]` form crashed on those JSONs).
+        dense_size = raw.get("dense_size") or (raw.get("inner_dense_layer_sizes") or [128])[0]
         kwargs = {
             "embedding_size": raw["embedding_size"],
             "hidden_size": raw.get("hidden_size", 128),
-            "gru_layers": raw.get("gru_layers", raw.get("lstm_layers", 2)),
-            "dense_size": raw.get("dense_size", raw.get("inner_dense_layer_sizes", [128])[0]),
+            "gru_layers": raw.get("gru_layers") or raw.get("lstm_layers") or 2,
+            "dense_size": dense_size,
             "dropout": raw.get("dropout", 0.1),
             "last_layer": raw.get("last_layer", "sigmoid"),
             "is_double": raw.get("is_double", True),

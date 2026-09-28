@@ -173,19 +173,21 @@ When `--use_nap2` is set, the search loads three model files (`.pt`) plus their 
 
 The four `.pt` paths and the predictor JSON are required. The two AE JSONs are optional — leave them empty to use the autoencoder's default architecture. Predictor type (LSTM vs BiGRU) and normalization mode are auto-detected from the supplied JSON files.
 
-Example with explicit per-file paths:
+The order in which the two 128-dim AE embeddings are concatenated is also read from the predictor JSON (`embedding_order`). Absent or `"wg"` means `[weights, gradients]` — the NAPv2 repo's order, used by every model trained with the repo (e.g. `NAPv2_assets/ae_lognorm_seed42/*`). `"gw"` (`[gradients, weights]`) exists only for Michael's deployed checkpoints, whose shared predictor JSON under `files_for_nap2_runs/` is tagged with it. The wrong order raises no error — predictions collapse to a near-constant value — so the resolved value is logged at startup.
+
+Example with explicit per-file paths (the CIFAR-10 model used by `scripts/run_cifar10_nb201_bigru.sh`):
 
 ```bash
 python search/evolution_search.py --use_nap2 \
   --search_space micro --init_channels 16 --layers 8 \
   --epochs 20 --pop_size 40 --n_offspring 20 --n_gens 30 \
   --output_dir experiments/cifar10 \
-  --nap2_ae_weights_pt     trained_models/cifar10/ae/weights/ae_weights.pt \
-  --nap2_ae_weights_json   trained_models/cifar10/ae/weights/aew_model_hyper_params.json \
-  --nap2_ae_gradients_pt   trained_models/cifar10/ae/gradients/ae_gradients.pt \
-  --nap2_ae_gradients_json trained_models/cifar10/ae/gradients/aeg_model_hyper_params.json \
-  --nap2_lstm_pt           trained_models/cifar10/lstm/cp/model_state_cp/lstm_reg_final.pt \
-  --nap2_lstm_json         trained_models/cifar10/lstm/lstm_model_hyper_params.json
+  --nap2_ae_weights_pt     ~/NAP2_models/single/c10/ae/weights/best_ae_model.pt \
+  --nap2_ae_weights_json   ~/NAP2_models/single/c10/ae/weights/model_hyper_params.json \
+  --nap2_ae_gradients_pt   ~/NAP2_models/single/c10/ae/gradients/best_ae_model.pt \
+  --nap2_ae_gradients_json ~/NAP2_models/single/c10/ae/gradients/model_hyper_params.json \
+  --nap2_lstm_pt           ~/NAP2_models/single/c10/lstm/cp/model_state_cp/model.pt \
+  --nap2_lstm_json         ~/NAP2_models/single/c10/lstm/model_hyper_params.json
 ```
 
 Without `--use_nap2`, all six paths are ignored — the search runs without the predictor.
