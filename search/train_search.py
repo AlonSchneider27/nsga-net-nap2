@@ -77,7 +77,7 @@ def main(genome, epochs, search_space='micro',
          layers=11, auxiliary=False, cutout=False, drop_path_prob=0.0, predictor=None,
          dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0,
          fitness_scorers=None, nap2_steps_list=None, lc_cadence='snapshot',
-         lc_epoch_cap=0):
+         lc_epoch_cap=0, skip_valid=False):
 
     # ---- train logger ----------------- #
     save_pth = os.path.join(expr_root, '{}'.format(save))
@@ -431,8 +431,14 @@ def main(genome, epochs, search_space='micro',
         logging.info('epoch-native fitness scored: %d methods x %d epochs',
                      len(epoch_native_lc), len(epoch_loss_sums))
 
-    valid_acc, valid_obj = infer(valid_queue, model, criterion)
-    logging.info('valid_acc %f', valid_acc)
+    if skip_valid:
+        # Lookup-driven guided search (--nap2_lookup, --epochs 0): the model is
+        # untrained and valid_acc would be meaningless, so skip the pass.
+        valid_acc, valid_obj = 0.0, float('nan')
+        logging.info('valid_acc %f (validation pass skipped: untrained model, lookup mode)', valid_acc)
+    else:
+        valid_acc, valid_obj = infer(valid_queue, model, criterion)
+        logging.info('valid_acc %f', valid_acc)
 
     # calculate for flops
     model = add_flops_counting_methods(model)
