@@ -274,16 +274,18 @@ def main(genome, epochs, search_space='micro',
                         seq = torch.cat([seq, pad], dim=0)
                     nap2_budget_preds[k] = float(predictor._lstm.predict(seq))
                 pred_acc = nap2_budget_preds[max(nap2_steps_list)]
-                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s; budgets %s; t_nap2=%.1fs)',
+                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s, interval=%d; budgets %s; t_nap2=%.1fs)',
                              pred_acc, max(nap2_steps_list), nap2_max_steps,
+                             getattr(predictor, 'snapshot_interval', 100),
                              ' '.join(f'@{k}={v:.4f}'
                                       for k, v in sorted(nap2_budget_preds.items())),
                              time.time() - t_nap2)
             else:
                 pred_acc = float(predictor.score(score_model, train_queue, steps=nap2_steps,
                                                  max_steps=nap2_max_steps))
-                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s; t_nap2=%.1fs)',
-                             pred_acc, nap2_steps, nap2_max_steps, time.time() - t_nap2)
+                logging.info('nap2 pred_acc = %.4f (steps=%d, pad_to=%s, interval=%d; t_nap2=%.1fs)',
+                             pred_acc, nap2_steps, nap2_max_steps,
+                             getattr(predictor, 'snapshot_interval', 100), time.time() - t_nap2)
             del score_model
         except Exception:
             logging.exception('nap2 prediction failed')

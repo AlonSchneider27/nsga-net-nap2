@@ -88,6 +88,20 @@ def resolve_normalize(ae_params: Optional[Dict] = None,
 EMBEDDING_ORDERS = ("wg", "gw")
 
 
+def resolve_snapshot_interval(predictor_params: Optional[Dict] = None) -> tuple:
+    """Mini-batches between snapshots the predictor was trained on.
+
+    Reads ``snapshot_interval`` from the predictor JSON; absent means the
+    historical 100 (michael's checkpoints). Returns ``(interval, source)``.
+    """
+    if predictor_params and predictor_params.get("snapshot_interval") is not None:
+        iv = int(predictor_params["snapshot_interval"])
+        if iv < 1:
+            raise ValueError(f"predictor JSON snapshot_interval={iv!r}; expected a positive int")
+        return iv, "predictor_json:snapshot_interval"
+    return int(DEFAULT_TRAINING_CONFIG["snapshot_interval"]), "default(100)"
+
+
 def resolve_embedding_order(predictor_params: Optional[Dict] = None) -> tuple:
     """Return ``(order, source)`` for the AE-embedding concat order.
 
@@ -127,6 +141,7 @@ class NAP2Predictor:
         lstm: Optional[nn.Module] = None,
         normalize: str = "none",
         embedding_order: str = "wg",
+        snapshot_interval: int = DEFAULT_TRAINING_CONFIG["snapshot_interval"],
     ) -> None:
         if embedding_order not in EMBEDDING_ORDERS:
             raise ValueError(
@@ -136,6 +151,9 @@ class NAP2Predictor:
         self._lstm = lstm if lstm is not None else LSTMPredictor()
         self._normalize = normalize
         self._embedding_order = embedding_order
+        # Cadence the predictor was trained on; used as the partial-training
+        # snapshot interval unless training_config overrides it explicitly.
+        self.snapshot_interval = int(snapshot_interval)
 
         self._ae_weights.eval()
         self._ae_gradients.eval()
@@ -196,6 +214,8 @@ class NAP2Predictor:
         logging.info("nap2: feature-map normalize=%s (from %s)", normalize, source)
         embedding_order, order_src = resolve_embedding_order(pred_params)
         logging.info("nap2: embedding order=%s (from %s)", embedding_order, order_src)
+        snapshot_interval, iv_src = resolve_snapshot_interval(pred_params)
+        logging.info("nap2: snapshot interval=%d mb (from %s)", snapshot_interval, iv_src)
 
         model_path = str(base / "lstm" / "cp" / "model_state_cp" / "model.pt")
         params_path = str(predictor_params_path)
@@ -211,7 +231,8 @@ class NAP2Predictor:
 
         return cls(ae_weights=ae_weights, ae_gradients=ae_gradients,
                     lstm=predictor, normalize=normalize,
-                    embedding_order=embedding_order)
+                    embedding_order=embedding_order,
+                    snapshot_interval=snapshot_interval)
 
     def score(
         self,
@@ -289,26 +310,8 @@ class NAP2Predictor:
             Tensor of shape [max(steps, max_steps), 256] with concatenated
             weight+gradient embeddings.
         """
-        config = dict(DEFAULT_TRAINING_CONFIG)
-        if training_config is not None:
-            config.update(training_config)
-
-        interval = config["snapshot_interval"]
-
-        # Collect snapshots via partial training
-        collector = SnapshotCollector(
-            model, interval=interval, max_snapshots=steps,
-        )
-        self._partial_train(model, dataloader, steps, interval, collector, config)
-
-        # Extract statistics
-        weight_stats = extract_all_stats(collector.get_weight_snapshots())
-        gradient_stats = extract_all_stats(collector.get_gradient_snapshots())
-
-        # Create feature maps: [steps, 65, 100, 12]
-        weight_maps = create_feature_map_sequence(weight_stats)
-        gradient_maps = create_feature_map_sequence(gradient_stats)
-
+        weight_maps, gradient_maps = self.collect_maps(
+            model, dataloader, steps, training_config)
         # Encode feature maps
         embeddings = self._encode_maps(weight_maps, gradient_maps)
 
@@ -321,6 +324,42 @@ class NAP2Predictor:
             embeddings = torch.cat([embeddings, pad], dim=0)
 
         return embeddings
+
+    def collect_maps(
+        self,
+        model: nn.Module,
+        dataloader: torch.utils.data.DataLoader,
+        steps: int = 5,
+        training_config: Optional[Dict] = None,
+    ):
+        """Partially train ``model`` and return the raw feature-map sequences.
+
+        The snapshot interval defaults to ``self.snapshot_interval`` (the
+        cadence this predictor was trained on); ``training_config`` may
+        override it. Returns ``(weight_maps, gradient_maps)``, each of shape
+        [steps, 65, 100, 12], un-normalized -- the AE-specific normalization
+        is applied in ``_encode_maps``, so one collection can be encoded by
+        several predictors (different AEs) of the same cadence.
+        """
+        config = dict(DEFAULT_TRAINING_CONFIG)
+        config["snapshot_interval"] = self.snapshot_interval
+        if training_config is not None:
+            config.update(training_config)
+        interval = int(config["snapshot_interval"])
+
+        collector = SnapshotCollector(
+            model, interval=interval, max_snapshots=steps,
+        )
+        self._partial_train(model, dataloader, steps, interval, collector, config)
+
+        weight_stats = extract_all_stats(collector.get_weight_snapshots())
+        gradient_stats = extract_all_stats(collector.get_gradient_snapshots())
+        return (create_feature_map_sequence(weight_stats),
+                create_feature_map_sequence(gradient_stats))
+
+    def encode_maps(self, weight_maps: np.ndarray, gradient_maps: np.ndarray) -> torch.Tensor:
+        """Public alias of ``_encode_maps`` (normalize + AE encode + concat)."""
+        return self._encode_maps(weight_maps, gradient_maps)
 
     def _partial_train(
         self,
