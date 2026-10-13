@@ -75,6 +75,48 @@ def resolve_normalize(ae_params: Optional[Dict] = None,
     return "none", "default(no normalize/mode found)"
 
 
+# Order in which the two 128-dim AE embeddings are concatenated into the
+# predictor's 256-dim input. It is a property of the predictor checkpoint:
+#   "wg"  [weights, gradients] -- the NAPv2 repo's order (train_lstm.py,
+#         predict.py, NAP2Predictor), i.e. every model trained with the repo
+#         (e.g. NAPv2_assets/ae_lognorm_seed42/*). The default.
+#   "gw"  [gradients, weights] -- michael's deployed checkpoints only
+#         (cross-dataset-autoresearch/lookup_tables/*/model.pt, trained by
+#         older code). Must be declared in their predictor JSON.
+# The wrong order raises no error: predictions collapse to a near-constant
+# value and KT falls to ~0.3, so the resolved value is logged at load time.
+EMBEDDING_ORDERS = ("wg", "gw")
+
+
+def resolve_snapshot_interval(predictor_params: Optional[Dict] = None) -> tuple:
+    """Mini-batches between snapshots the predictor was trained on.
+
+    Reads ``snapshot_interval`` from the predictor JSON; absent means the
+    historical 100 (michael's checkpoints). Returns ``(interval, source)``.
+    """
+    if predictor_params and predictor_params.get("snapshot_interval") is not None:
+        iv = int(predictor_params["snapshot_interval"])
+        if iv < 1:
+            raise ValueError(f"predictor JSON snapshot_interval={iv!r}; expected a positive int")
+        return iv, "predictor_json:snapshot_interval"
+    return int(DEFAULT_TRAINING_CONFIG["snapshot_interval"]), "default(100)"
+
+
+def resolve_embedding_order(predictor_params: Optional[Dict] = None) -> tuple:
+    """Return ``(order, source)`` for the AE-embedding concat order.
+
+    Reads ``embedding_order`` from the predictor JSON; absent means "wg".
+    Any other value raises rather than guessing.
+    """
+    if predictor_params and predictor_params.get("embedding_order") is not None:
+        order = str(predictor_params["embedding_order"])
+        if order not in EMBEDDING_ORDERS:
+            raise ValueError(
+                f"predictor JSON embedding_order={order!r}; expected one of {EMBEDDING_ORDERS}")
+        return order, "predictor_json:embedding_order"
+    return "wg", "default([weights, gradients], the NAPv2 repo order)"
+
+
 class NAP2Predictor:
     """High-level orchestrator that ties the full NAP2 pipeline together.
 
@@ -88,6 +130,8 @@ class NAP2Predictor:
         ae_weights: Pre-trained autoencoder for weight feature maps.
         ae_gradients: Pre-trained autoencoder for gradient feature maps.
         lstm: Pre-trained LSTM predictor.
+        normalize: Feature-map normalization the AEs were trained with.
+        embedding_order: "wg" (default) or "gw", see EMBEDDING_ORDERS.
     """
 
     def __init__(
@@ -96,11 +140,20 @@ class NAP2Predictor:
         ae_gradients: Optional[FeatureMapAutoEncoder] = None,
         lstm: Optional[nn.Module] = None,
         normalize: str = "none",
+        embedding_order: str = "wg",
+        snapshot_interval: int = DEFAULT_TRAINING_CONFIG["snapshot_interval"],
     ) -> None:
+        if embedding_order not in EMBEDDING_ORDERS:
+            raise ValueError(
+                f"embedding_order={embedding_order!r}; expected one of {EMBEDDING_ORDERS}")
         self._ae_weights = ae_weights if ae_weights is not None else FeatureMapAutoEncoder()
         self._ae_gradients = ae_gradients if ae_gradients is not None else FeatureMapAutoEncoder()
         self._lstm = lstm if lstm is not None else LSTMPredictor()
         self._normalize = normalize
+        self._embedding_order = embedding_order
+        # Cadence the predictor was trained on; used as the partial-training
+        # snapshot interval unless training_config overrides it explicitly.
+        self.snapshot_interval = int(snapshot_interval)
 
         self._ae_weights.eval()
         self._ae_gradients.eval()
@@ -159,6 +212,10 @@ class NAP2Predictor:
             ae_params = json.load(f)
         normalize, source = resolve_normalize(ae_params, pred_params)
         logging.info("nap2: feature-map normalize=%s (from %s)", normalize, source)
+        embedding_order, order_src = resolve_embedding_order(pred_params)
+        logging.info("nap2: embedding order=%s (from %s)", embedding_order, order_src)
+        snapshot_interval, iv_src = resolve_snapshot_interval(pred_params)
+        logging.info("nap2: snapshot interval=%d mb (from %s)", snapshot_interval, iv_src)
 
         model_path = str(base / "lstm" / "cp" / "model_state_cp" / "model.pt")
         params_path = str(predictor_params_path)
@@ -173,7 +230,9 @@ class NAP2Predictor:
             )
 
         return cls(ae_weights=ae_weights, ae_gradients=ae_gradients,
-                    lstm=predictor, normalize=normalize)
+                    lstm=predictor, normalize=normalize,
+                    embedding_order=embedding_order,
+                    snapshot_interval=snapshot_interval)
 
     def score(
         self,
@@ -251,26 +310,8 @@ class NAP2Predictor:
             Tensor of shape [max(steps, max_steps), 256] with concatenated
             weight+gradient embeddings.
         """
-        config = dict(DEFAULT_TRAINING_CONFIG)
-        if training_config is not None:
-            config.update(training_config)
-
-        interval = config["snapshot_interval"]
-
-        # Collect snapshots via partial training
-        collector = SnapshotCollector(
-            model, interval=interval, max_snapshots=steps,
-        )
-        self._partial_train(model, dataloader, steps, interval, collector, config)
-
-        # Extract statistics
-        weight_stats = extract_all_stats(collector.get_weight_snapshots())
-        gradient_stats = extract_all_stats(collector.get_gradient_snapshots())
-
-        # Create feature maps: [steps, 65, 100, 12]
-        weight_maps = create_feature_map_sequence(weight_stats)
-        gradient_maps = create_feature_map_sequence(gradient_stats)
-
+        weight_maps, gradient_maps = self.collect_maps(
+            model, dataloader, steps, training_config)
         # Encode feature maps
         embeddings = self._encode_maps(weight_maps, gradient_maps)
 
@@ -283,6 +324,42 @@ class NAP2Predictor:
             embeddings = torch.cat([embeddings, pad], dim=0)
 
         return embeddings
+
+    def collect_maps(
+        self,
+        model: nn.Module,
+        dataloader: torch.utils.data.DataLoader,
+        steps: int = 5,
+        training_config: Optional[Dict] = None,
+    ):
+        """Partially train ``model`` and return the raw feature-map sequences.
+
+        The snapshot interval defaults to ``self.snapshot_interval`` (the
+        cadence this predictor was trained on); ``training_config`` may
+        override it. Returns ``(weight_maps, gradient_maps)``, each of shape
+        [steps, 65, 100, 12], un-normalized -- the AE-specific normalization
+        is applied in ``_encode_maps``, so one collection can be encoded by
+        several predictors (different AEs) of the same cadence.
+        """
+        config = dict(DEFAULT_TRAINING_CONFIG)
+        config["snapshot_interval"] = self.snapshot_interval
+        if training_config is not None:
+            config.update(training_config)
+        interval = int(config["snapshot_interval"])
+
+        collector = SnapshotCollector(
+            model, interval=interval, max_snapshots=steps,
+        )
+        self._partial_train(model, dataloader, steps, interval, collector, config)
+
+        weight_stats = extract_all_stats(collector.get_weight_snapshots())
+        gradient_stats = extract_all_stats(collector.get_gradient_snapshots())
+        return (create_feature_map_sequence(weight_stats),
+                create_feature_map_sequence(gradient_stats))
+
+    def encode_maps(self, weight_maps: np.ndarray, gradient_maps: np.ndarray) -> torch.Tensor:
+        """Public alias of ``_encode_maps`` (normalize + AE encode + concat)."""
+        return self._encode_maps(weight_maps, gradient_maps)
 
     def _partial_train(
         self,
@@ -382,14 +459,16 @@ class NAP2Predictor:
             w_emb = self._ae_weights.encode(w_tensor)  # [1, 128]
             g_emb = self._ae_gradients.encode(g_tensor)  # [1, 128]
 
-            # Concatenate: [1, 256]
-            # Deployed-artifact order: [gradients, weights]. Verified against
-            # michael's embedding cache (cifar10_via_log_cifar10.pkl): our
-            # embeddings match it at cos>0.98 in this order (and the BiGRU
-            # reproduces the lookup exactly from the cache), while the
-            # cleaned NAPv2 repo's [w, g] order collapses predictions to
-            # the ~0.9 prior. dims 0-127 = gradient emb, 128-255 = weight emb.
-            combined = torch.cat([g_emb, w_emb], dim=1)
+            # Concatenate: [1, 256] in the checkpoint's order (EMBEDDING_ORDERS).
+            # "gw" exists only for michael's deployed checkpoints: verified
+            # against his embedding cache (cifar10_via_log_cifar10.pkl), their
+            # dims 0-127 are the gradient embedding. Everything trained with
+            # the NAPv2 repo is "wg". The wrong order collapses predictions to
+            # a near-constant value without any error.
+            if self._embedding_order == "gw":
+                combined = torch.cat([g_emb, w_emb], dim=1)
+            else:
+                combined = torch.cat([w_emb, g_emb], dim=1)
             embeddings.append(combined.squeeze(0))
 
         return torch.stack(embeddings, dim=0)  # [steps, 256]

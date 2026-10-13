@@ -64,3 +64,29 @@ def test_training_actually_updates_the_given_model():
                       budget_minibatches=3,
                       training_config={'snapshot_interval': 100})
     assert not torch.equal(before, model.weight.detach())
+
+
+def test_epoch_native_scores_values():
+    from fitness.trace import epoch_native_scores
+    from fitness.scorers import FITNESS_SCORERS
+    scorers = [FITNESS_SCORERS[n]() for n in ('sotl', 'sotl_e', 'early_stop')]
+    loss_sums = [100.0, 60.0, 40.0]          # per-epoch summed minibatch losses
+    val_accs = [0.30, 0.45, 0.55]
+    s = epoch_native_scores(scorers, loss_sums, val_accs)
+    # sotl@eK = -(sum of epoch sums 1..K)
+    assert s['sotl@e1'] == -100.0
+    assert s['sotl@e3'] == -200.0
+    # sotl_e@eK = -(epoch K's sum) — NASLib's per-epoch native definition
+    assert s['sotl_e@e1'] == -100.0
+    assert s['sotl_e@e3'] == -40.0
+    # early_stop@eK = val acc at epoch K
+    assert s['early_stop@e2'] == 0.45
+    assert len(s) == 9                        # 3 methods x 3 epochs
+
+
+def test_epoch_native_scores_nonfinite_dropped():
+    from fitness.trace import epoch_native_scores
+    from fitness.scorers import FITNESS_SCORERS
+    s = epoch_native_scores([FITNESS_SCORERS['sotl']()],
+                            [float('nan'), 50.0], [])
+    assert s['sotl@e1'] is None               # NaN epoch sum -> dropped

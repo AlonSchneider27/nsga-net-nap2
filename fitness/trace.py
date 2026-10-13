@@ -160,3 +160,43 @@ def prefix_trace(trace, steps):
         snapshot_interval=trace.snapshot_interval,
         times=trace.times,
     )
+
+
+def epoch_native_scores(scorers, epoch_loss_sums, epoch_val_accs,
+                        target_suffix='e'):
+    """Score trace-scorers at their NATIVE epoch cadence.
+
+    Inputs come from the REAL training loop: per-epoch summed minibatch
+    train losses, and val accuracy [0,1] measured at each epoch boundary
+    (empty list if no val-based scorer is selected). Each budget K in
+    epochs 1..E is scored from a pseudo-trace where one "minibatch" is one
+    epoch (epoch_len=1, snapshot_interval=1): sotl = -(sum of epoch sums),
+    sotl_e = -(last epoch sum) — NASLib's per-epoch definitions — and the
+    extrapolators see x = 1..K epochs with x_target = their epoch horizon.
+
+    Returns {f"{name}@{target_suffix}{K}": float|None}.
+    """
+    scores = {}
+    n_epochs = len(epoch_loss_sums)
+    full = TrainingTrace(
+        minibatch_losses=list(epoch_loss_sums),
+        val_acc_curve=list(epoch_val_accs),
+        final_val_acc=epoch_val_accs[-1] if epoch_val_accs else None,
+        epoch_len=1,
+        snapshot_interval=1,
+        times={'train': 0.0, 'val': 0.0},
+    )
+    for scorer in scorers:
+        for k in range(1, n_epochs + 1):
+            key = f'{scorer.name}@{target_suffix}{k}'
+            try:
+                value = float(scorer.score(prefix_trace(full, k)))
+                if value != value or value in (float('inf'), float('-inf')):
+                    value = None
+                scores[key] = value
+            except Exception:
+                import logging
+                logging.exception('epoch-native %s failed at epoch %d',
+                                  scorer.name, k)
+                scores[key] = None
+    return scores

@@ -65,6 +65,9 @@ ARCH_SUMMARY_RE = re.compile(
 #   arch 7 fitness: sotl@1=-32.1 sotl@5=-123.456 nap2@5=0.8412 ...
 ARCH_FITNESS_RE = re.compile(r"arch\s+(\d+)\s+fitness:\s*(.+)$")
 FITNESS_PAIR_RE = re.compile(r"([\w@]+)=([0-9.eE+-]+)")
+# Emitted once at run start by guided runs (--fitness_objective):
+#   objective_method = sotl_e (objs[0] = -score at budget 5; ...)
+OBJECTIVE_METHOD_RE = re.compile(r"objective_method\s*=\s*(\w+)")
 
 
 # ----------------------------- public API ---------------------------------
@@ -255,6 +258,22 @@ def compute_fitness_metrics(architectures: Dict[str, Dict]) -> Dict[str, Dict]:
     return out
 
 
+def scrape_objective_method(log_path: Union[str, Path]) -> Optional[str]:
+    """Return the guided run's objective method name, or None.
+
+    Guided runs (--fitness_objective) log ``objective_method = <name>`` once
+    at run start; default runs never emit the line.
+    """
+    # errors="replace" matches scrape(): real search logs can contain stray
+    # non-UTF-8 bytes, and this runs unguarded inside write_summary.
+    with Path(log_path).open(errors="replace") as f:
+        for line in f:
+            m = OBJECTIVE_METHOD_RE.search(line)
+            if m:
+                return m.group(1)
+    return None
+
+
 def write_summary(
     log_path: Union[str, Path],
     output_path: Union[str, Path],
@@ -284,6 +303,9 @@ def write_summary(
         metrics = {"error": f"{type(e).__name__}: {e}"}
 
     payload = {"architectures": architectures, "metrics": metrics}
+    objective_method = scrape_objective_method(log_path)
+    if objective_method:
+        payload["objective_method"] = objective_method
     if any(v.get("fitness") for v in architectures.values()):
         try:
             payload["fitness_metrics"] = compute_fitness_metrics(architectures)

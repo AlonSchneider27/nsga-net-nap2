@@ -6,6 +6,7 @@ import os
 import time
 import logging
 import argparse
+import json
 from misc import utils
 
 import numpy as np
@@ -116,6 +117,40 @@ parser.add_argument('--lc_target_epochs', type=int, default=0,
                     help='epoch horizon lce_m/lc_pfn extrapolate the val-acc curve to. '
                          'Default 0 = use --epochs (the horizon the summary KT is computed '
                          'against); set 200 for the NB201 full-training horizon.')
+parser.add_argument('--lc_cadence', type=str, default='snapshot',
+                    choices=['snapshot', 'epoch'],
+                    help='sampling cadence for the 5 learning-curve methods. '
+                         '"snapshot" (default) = one observation per 100 '
+                         'mini-batches from a shared partial-training run '
+                         '(the paper-table axis). "epoch" = NATIVE cadence: '
+                         'signals read from the real proxy training loop '
+                         '(per-epoch loss sums + one val pass per epoch), '
+                         'keys logged as name@e<K> for every epoch K; '
+                         'requires --epochs > 0. nap2 (100-mb snapshots) and '
+                         'zero-cost proxies (at-init) keep their own native '
+                         'cadence either way.')
+parser.add_argument('--nap2_lookup', type=str, default='',
+                    help='JSON lookup table {arch_str: predicted accuracy} (e.g. one of '
+                         'NAPv2_assets/nb201_lut_snap75/tables/*/nap2_snap<k>_<ds>.json). '
+                         'When set, nap2 scores come from the table instead of live partial '
+                         'training: no predictor checkpoints, no GPU. nb201 only. Combine with '
+                         '--fitness_objective nap2 --epochs 0 for a lookup-driven guided search.')
+parser.add_argument('--lc_epoch_cap', type=int, default=0,
+                    help='epoch-cadence only: LC methods observe at most this many '
+                         'epochs (0 = all --epochs). Set to ceil(max_mb_budget / '
+                         'epoch_len) — 12 for CIFAR (2300mb/196), 4 for '
+                         'ImageNet16-120 (2300mb/593) — so later epochs train '
+                         'purely for valid_acc/GA guidance with no method overhead.')
+parser.add_argument('--fitness_objective', type=str, default='',
+                    help='single fitness method whose score REPLACES the accuracy '
+                         'objective: objs[0] = -score (higher=better; pymoo minimizes). '
+                         'One of nap2,synflow,grad_norm,snip,sotl,sotl_e,early_stop,'
+                         'lce_m,lc_pfn. Auto-added to the scored set; --fitness still '
+                         'shadow-logs anything else listed. Score taken at --nap2_steps, '
+                         'or max(--nap2_steps_list) when set. Failed/non-finite scores '
+                         'get a large penalty (arch deselected). Default "" = objectives '
+                         'unchanged (100-valid_acc, flops). Combine with --epochs 0 to '
+                         'skip per-arch proxy training entirely.')
 args = parser.parse_args()
 
 log_format = '%(asctime)s %(message)s'
@@ -123,6 +158,29 @@ logging.basicConfig(stream=sys.stdout, level=logging.INFO,
                     format=log_format, datefmt='%m/%d %I:%M:%S %p')
 
 pop_hist = []  # keep track of every evaluated architecture
+
+
+# Guided mode: an arch whose objective score failed gets this value for
+# objs[0] so NSGA-II deselects it (must exceed any plausible -score; sotl's
+# -score is a loss sum that can reach the low thousands).
+OBJECTIVE_PENALTY = 1e9
+
+
+def objective_score(performance, method, steps_list=None):
+    """Guided-objective score for `method` from one train_search.main() result.
+
+    Returns a float, or None when the score is missing. 'nap2' reads
+    performance['pred_acc'] (which already equals the max-budget nap2@k in
+    budget-list mode); other methods read fitness_scores at
+    '<name>@<max budget>' with a plain-key fallback (zero-cost proxies stay
+    budget-free even in list mode).
+    """
+    if method == 'nap2':
+        return performance.get('pred_acc')
+    fs = performance.get('fitness_scores') or {}
+    if steps_list:
+        return fs.get('{}@{}'.format(method, steps_list[-1]), fs.get(method))
+    return fs.get(method)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -133,7 +191,8 @@ class NAS(Problem):
     def __init__(self, search_space='micro', n_var=20, n_obj=1, n_constr=0, lb=None, ub=None,
                  init_channels=24, layers=8, epochs=25, save_dir=None, predictor=None,
                  dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0,
-                 fitness_scorers=None, nap2_steps_list=None):
+                 fitness_scorers=None, nap2_steps_list=None, fitness_objective='',
+                 lc_cadence='snapshot', lc_epoch_cap=0, nap2_lookup=None):
         super().__init__(n_var=n_var, n_obj=n_obj, n_constr=n_constr, type_var=np.int)
         self.xl = lb
         self.xu = ub
@@ -149,6 +208,10 @@ class NAS(Problem):
         self._nap2_max_steps = nap2_max_steps
         self._fitness_scorers = fitness_scorers
         self._nap2_steps_list = nap2_steps_list
+        self._fitness_objective = fitness_objective
+        self._lc_cadence = lc_cadence
+        self._lc_epoch_cap = lc_epoch_cap
+        self._nap2_lookup = nap2_lookup  # {arch_str: score} or None
         # Genome-keyed cache: pymoo dedups offspring within a generation but
         # re-samples across generations, and every re-evaluation costs a full
         # proxy training. Budget and method set are constant within a run, so
@@ -196,11 +259,49 @@ class NAS(Problem):
                                                 nap2_steps=self._nap2_steps,
                                                 nap2_max_steps=self._nap2_max_steps,
                                                 fitness_scorers=self._fitness_scorers,
-                                                nap2_steps_list=self._nap2_steps_list)
-                self._perf_cache[cache_key] = performance
+                                                nap2_steps_list=self._nap2_steps_list,
+                                                lc_cadence=self._lc_cadence,
+                                                lc_epoch_cap=self._lc_epoch_cap,
+                                                skip_valid=self._nap2_lookup is not None
+                                                and self._epochs == 0)
+                if self._nap2_lookup is not None:
+                    # Lookup mode: the nap2 score is read from the table by
+                    # arch string (nb201 only); a missing arch stays None and
+                    # gets the objective penalty like a failed live query.
+                    arch_str = nb201_encoding.decode(genome).arch_str
+                    _lut = self._nap2_lookup.get(arch_str)
+                    performance['pred_acc'] = float(_lut) if _lut is not None else None
+                    fs = dict(performance.get('fitness_scores') or {})
+                    fs['nap2'] = performance['pred_acc']
+                    performance['fitness_scores'] = fs
+                    logging.info('nap2 pred_acc = %s (lookup table)',
+                                 'n/a' if _lut is None else '%.4f' % _lut)
+                # Guided mode: don't cache a result whose guiding score
+                # failed — caching it would turn a transient failure (OOM,
+                # predictor exception) into a permanent penalty against that
+                # genome for the whole search.
+                if self._fitness_objective:
+                    _s = objective_score(performance, self._fitness_objective,
+                                         self._nap2_steps_list)
+                    if _s is not None and np.isfinite(_s):
+                        self._perf_cache[cache_key] = performance
+                else:
+                    self._perf_cache[cache_key] = performance
 
             # all objectives assume to be MINIMIZED !!!!!
-            objs[i, 0] = 100 - performance['valid_acc']
+            if self._fitness_objective:
+                score = objective_score(performance, self._fitness_objective,
+                                        self._nap2_steps_list)
+                if score is None or not np.isfinite(score):
+                    objs[i, 0] = OBJECTIVE_PENALTY
+                    logging.warning('arch %d: %s score unavailable (%r); '
+                                    'assigning penalty %g', arch_id,
+                                    self._fitness_objective, score,
+                                    OBJECTIVE_PENALTY)
+                else:
+                    objs[i, 0] = -score
+            else:
+                objs[i, 0] = 100 - performance['valid_acc']
             objs[i, 1] = performance['flops']
 
             pred_acc = performance.get('pred_acc')
@@ -224,6 +325,52 @@ class NAS(Problem):
 # ---------------------------------------------------------------------------------------------------------
 # Define what statistics to print or save for each generation
 # ---------------------------------------------------------------------------------------------------------
+def save_final_population(res, search_space, path, objective_method=''):
+    """Write the final population (+ non-dominated-front membership) as JSON.
+
+    `res` is a pymoo 0.3.0 Result: .pop is the final Population, .X the
+    decision variables of the feasible non-dominated front (None when empty).
+    The population was previously discarded; guided runs need it to pick
+    which architectures to fully train afterwards. Returns the payload.
+    """
+    import json
+    encoders = {'micro': micro_encoding, 'macro': macro_encoding,
+                'nb201': nb201_encoding}
+    enc = encoders[search_space]
+
+    front_keys = set()
+    if getattr(res, 'X', None) is not None:
+        for row in np.atleast_2d(res.X):
+            front_keys.add(str(enc.convert(row)))
+
+    population = []
+    pop_x = res.pop.get('X')
+    pop_f = res.pop.get('F')
+    for row, f in zip(pop_x, pop_f):
+        genome = enc.convert(row)
+        genotype = enc.decode(genome)
+        entry = {
+            'X': [int(v) for v in np.asarray(row).ravel()],
+            'F': [float(v) for v in np.asarray(f).ravel()],
+            'genotype': repr(genotype),
+            'on_pareto_front': str(genome) in front_keys,
+        }
+        if search_space == 'nb201':
+            entry['arch_str'] = genotype.arch_str
+        population.append(entry)
+
+    payload = {
+        'search_space': search_space,
+        'objective_method': objective_method,
+        'objectives': ['-{}'.format(objective_method) if objective_method
+                       else '100-valid_acc', 'flops'],
+        'population': population,
+    }
+    with open(path, 'w') as fh:
+        json.dump(payload, fh, indent=2)
+    return payload
+
+
 def do_every_generations(algorithm):
     # this function will be call every generation
     # it has access to the whole algorithm class
@@ -282,7 +429,8 @@ def _load_nap2_predictor(paths):
     """
     import json
     from nap2 import NAP2Predictor
-    from nap2.predictor import resolve_normalize
+    from nap2.predictor import (resolve_embedding_order, resolve_normalize,
+                                resolve_snapshot_interval)
     from nap2.autoencoder import FeatureMapAutoEncoder
     from nap2.lstm_predictor import LSTMPredictor
     from nap2.bigru_predictor import BiGRUDualPredictor
@@ -321,7 +469,24 @@ def _load_nap2_predictor(paths):
     PredictorCls = BiGRUDualPredictor if predictor_type == 'bigru' else LSTMPredictor
     pred = PredictorCls.load(model_path=paths['lstm_pt'], params_path=paths['lstm_json'])
 
-    return NAP2Predictor(ae_weights=ae_w, ae_gradients=ae_g, lstm=pred, normalize=normalize)
+    # Concat order of the two AE embeddings, a property of the predictor
+    # checkpoint (nap2.predictor.EMBEDDING_ORDERS). Default "wg" =
+    # [weights, gradients], the NAPv2 repo order; michael's deployed
+    # checkpoints need "embedding_order": "gw" in their JSON. The wrong
+    # order raises nothing -- predictions collapse to a near-constant value.
+    embedding_order, order_src = resolve_embedding_order(pred_params)
+    logging.info('nap2 embedding order=%s (from %s)', embedding_order, order_src)
+    snapshot_interval, iv_src = resolve_snapshot_interval(pred_params)
+    logging.info('nap2 snapshot interval=%d mini-batches (from %s)', snapshot_interval, iv_src)
+    if embedding_order == 'gw':
+        logging.warning(
+            "nap2: legacy [gradients, weights] embedding order (michael's deployed "
+            "checkpoints). Models trained with the NAPv2 repo must NOT set this."
+        )
+
+    return NAP2Predictor(ae_weights=ae_w, ae_gradients=ae_g, lstm=pred,
+                         normalize=normalize, embedding_order=embedding_order,
+                         snapshot_interval=snapshot_interval)
 
 
 def main():
@@ -341,18 +506,47 @@ def main():
     expanded = []
     for t in tokens:
         expanded.extend(fitness_pkg.ALL_BASELINES if t == 'all' else [t])
+    LC_METHODS = {'sotl', 'sotl_e', 'early_stop', 'lce_m', 'lc_pfn'}
+    if args.lc_cadence == 'epoch':
+        if args.epochs == 0 and any(t in LC_METHODS for t in expanded):
+            raise ValueError('--lc_cadence epoch reads signals from the real '
+                             'training loop and needs --epochs > 0')
+        if args.fitness_objective in LC_METHODS:
+            raise ValueError('--fitness_objective with an LC method requires '
+                             'the snapshot cadence (epoch-native scores are '
+                             'shadow-logged only)')
+        logging.info('lc_cadence = epoch (native: LC signals from the real '
+                     'training loop, keys name@e<K>)')
+
+    if args.fitness_objective:
+        valid = set(fitness_pkg.ALL_BASELINES) | {'nap2'}
+        if args.fitness_objective not in valid:
+            raise ValueError('--fitness_objective must be one of {}, got {!r}'
+                             .format(sorted(valid), args.fitness_objective))
+        # The guiding method must be scored even when --fitness is empty.
+        if args.fitness_objective not in expanded:
+            expanded.append(args.fitness_objective)
+
     wants_nap2 = args.use_nap2 or 'nap2' in expanded
     baseline_names = [t for t in expanded if t != 'nap2']
+
+    # lce_m/lc_pfn extrapolation horizon: --lc_target_epochs, else --epochs,
+    # else 20 (the project GT horizon) — --epochs 0 guided runs must not
+    # collapse the horizon to a single snapshot ahead.
+    lc_horizon = args.lc_target_epochs or args.epochs or 20
+    if args.epochs == 0 and not args.lc_target_epochs:
+        logging.warning('--epochs 0: lce_m/lc_pfn extrapolation horizon '
+                        'defaults to %d epochs; set --lc_target_epochs to '
+                        'override', lc_horizon)
 
     fitness_scorers = None
     if baseline_names:
         fitness_scorers = fitness_pkg.build_scorers(
             ','.join(baseline_names),
             lcpfn_ckpt=args.lcpfn_ckpt or LCPFN_CKPT,
-            target_epochs=args.lc_target_epochs or args.epochs)
+            target_epochs=lc_horizon)
         logging.info('fitness baselines enabled: %s (lc target horizon: %d epochs)',
-                     [s.name for s in fitness_scorers],
-                     args.lc_target_epochs or args.epochs)
+                     [s.name for s in fitness_scorers], lc_horizon)
 
     # Parse --nap2_steps_list into sorted unique positive ints (or None).
     nap2_steps_list = None
@@ -365,6 +559,21 @@ def main():
         logging.info('budget list enabled: %s snapshots (partial train at %d, '
                      'all methods scored per budget from prefixes)',
                      nap2_steps_list, nap2_steps_list[-1])
+
+    if args.fitness_objective:
+        logging.info('objective_method = %s (objs[0] = -score at budget %s; '
+                     'flops objective unchanged)', args.fitness_objective,
+                     nap2_steps_list[-1] if nap2_steps_list else args.nap2_steps)
+
+    nap2_lookup = None
+    if args.nap2_lookup:
+        if args.search_space != 'nb201':
+            raise ValueError('--nap2_lookup is keyed by NB-201 arch strings (nb201 only)')
+        with open(args.nap2_lookup) as f:
+            nap2_lookup = {k: v for k, v in json.load(f).items() if not k.startswith('_')}
+        logging.info('nap2_lookup = %s (%d architectures; live nap2 disabled)',
+                     args.nap2_lookup, len(nap2_lookup))
+        wants_nap2 = False
 
     predictor = None
     if wants_nap2:
@@ -416,7 +625,11 @@ def main():
                   nap2_steps=args.nap2_steps,
                   nap2_max_steps=args.nap2_max_steps,
                   fitness_scorers=fitness_scorers,
-                  nap2_steps_list=nap2_steps_list)
+                  nap2_steps_list=nap2_steps_list,
+                  fitness_objective=args.fitness_objective,
+                  lc_cadence=args.lc_cadence,
+                  lc_epoch_cap=args.lc_epoch_cap,
+                  nap2_lookup=nap2_lookup)
 
     # configure the nsga-net method
     method = engine.nsganet(pop_size=args.pop_size,
@@ -427,6 +640,19 @@ def main():
                    method,
                    callback=do_every_generations,
                    termination=('n_gen', args.n_gens))
+
+    # Persist the final population (previously discarded) so guided runs can
+    # pick which architectures to fully train afterwards.
+    try:
+        payload = save_final_population(
+            res, args.search_space, os.path.join(args.save, 'final_pop.json'),
+            objective_method=args.fitness_objective)
+        n_front = sum(1 for e in payload['population'] if e['on_pareto_front'])
+        logging.info('final population written to final_pop.json '
+                     '(%d individuals, %d on front)',
+                     len(payload['population']), n_front)
+    except Exception:
+        logging.exception('final population save failed')
 
     # Write a per-architecture summary.json next to log.txt at run end.
     # Wrapped in try/except so a scrape failure can never invalidate the
