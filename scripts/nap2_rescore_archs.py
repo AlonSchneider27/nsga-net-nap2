@@ -49,6 +49,9 @@ def main():
     ap.add_argument('--out', required=True)
     ap.add_argument('--layers', type=int, default=15)
     ap.add_argument('--init-channels', type=int, default=16)
+    ap.add_argument('--save-embeddings', default='',
+                    help='optional .npz path: per-arch AE embeddings [n_predictors, steps, 256] (float32) so new '
+                         'BiGRUs on the same AEs can be re-scored without GPU; written alongside --out, resume-aware')
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(message)s', datefmt='%m/%d %H:%M:%S')
 
@@ -87,8 +90,25 @@ def main():
                     'seed': args.seed, 'device': device, 'chunk': args.chunk, 'n_chunks': args.n_chunks,
                     'layers': args.layers, 'init_channels': args.init_channels}
     n_cells = max(args.layers // 3, 1)
+    import numpy as np
+    embs = {}
+    if args.save_embeddings and os.path.exists(args.save_embeddings):
+        with np.load(args.save_embeddings, allow_pickle=False) as z:
+            embs = {k: z[k] for k in z.files}
+        logging.info('resuming embeddings: %d archs', len(embs))
+    pred_names = list(predictors)
+
+    def flush():
+        tmp = args.out + '.tmp'
+        json.dump(out, open(tmp, 'w'))
+        os.replace(tmp, args.out)
+        if args.save_embeddings:
+            tmpz = args.save_embeddings + '.tmp.npz'
+            np.savez(tmpz, **embs)
+            os.replace(tmpz, args.save_embeddings)
+
     for i, arch in enumerate(archs):
-        if arch in out:
+        if arch in out and (not args.save_embeddings or arch in embs):
             continue
         t0 = time.time()
         model = build_nb201_model(arch, num_classes=cfg['num_classes'], C=args.init_channels, N=n_cells)
@@ -103,10 +123,14 @@ def main():
             w_maps, g_maps = first.collect_maps(model, train_queue, steps=args.steps)
             t_collect = time.time() - t0
             scores = {}
+            emb_stack = []
             for name, pred in predictors.items():
                 emb = pred.encode_maps(w_maps, g_maps)
+                emb_stack.append(emb.detach().cpu().numpy().astype(np.float32))
                 scores[name] = {str(k): float(pred._lstm.predict(emb[:k])) for k in range(1, args.steps + 1)}
             out[arch] = scores
+            if args.save_embeddings:
+                embs[arch] = np.stack(emb_stack)  # [n_predictors, steps, 256], order = pred_names
             logging.info('[%d/%d] %s  collect %.0fs total %.0fs  %s', i + 1, len(archs), arch, t_collect, time.time() - t0,
                          ' '.join(f"{n}@{args.steps}={s[str(args.steps)]:.4f}" for n, s in scores.items()))
         except Exception:
@@ -116,9 +140,14 @@ def main():
             del model
             if device == 'cuda':
                 torch.cuda.empty_cache()
-        tmp = args.out + '.tmp'
-        json.dump(out, open(tmp, 'w'))
-        os.replace(tmp, args.out)
+        if args.save_embeddings and (i % 10 != 9) and arch in out and arch not in out.get('_failed', []):
+            # embeddings file is rewritten every 10 archs (and at the end); scores every arch
+            tmp = args.out + '.tmp'; json.dump(out, open(tmp, 'w')); os.replace(tmp, args.out)
+        else:
+            flush()
+    flush()
+    out['_meta']['embedding_predictor_order'] = pred_names
+    flush()
     logging.info('done: %d archs in %s', sum(1 for k in out if not k.startswith('_')), args.out)
 
 
