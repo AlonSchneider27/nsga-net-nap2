@@ -135,6 +135,11 @@ parser.add_argument('--nap2_lookup', type=str, default='',
                          'When set, nap2 scores come from the table instead of live partial '
                          'training: no predictor checkpoints, no GPU. nb201 only. Combine with '
                          '--fitness_objective nap2 --epochs 0 for a lookup-driven guided search.')
+parser.add_argument('--lookup_method', type=str, default='nap2',
+                    help='method name the --nap2_lookup table scores (default nap2). Any fitness '
+                         'baseline name works (sotl, sotl_e, early_stop, lce_m, lc_pfn, synflow, '
+                         'grad_norm, snip): the table value is stored as that method\'s fitness score '
+                         'and no live scoring of it happens. Pair with --fitness_objective <same name>.')
 parser.add_argument('--lc_epoch_cap', type=int, default=0,
                     help='epoch-cadence only: LC methods observe at most this many '
                          'epochs (0 = all --epochs). Set to ceil(max_mb_budget / '
@@ -192,7 +197,8 @@ class NAS(Problem):
                  init_channels=24, layers=8, epochs=25, save_dir=None, predictor=None,
                  dataset='cifar10', data='', nap2_steps=5, nap2_max_steps=0,
                  fitness_scorers=None, nap2_steps_list=None, fitness_objective='',
-                 lc_cadence='snapshot', lc_epoch_cap=0, nap2_lookup=None):
+                 lc_cadence='snapshot', lc_epoch_cap=0, nap2_lookup=None,
+                 lookup_method='nap2'):
         super().__init__(n_var=n_var, n_obj=n_obj, n_constr=n_constr, type_var=np.int)
         self.xl = lb
         self.xu = ub
@@ -212,6 +218,7 @@ class NAS(Problem):
         self._lc_cadence = lc_cadence
         self._lc_epoch_cap = lc_epoch_cap
         self._nap2_lookup = nap2_lookup  # {arch_str: score} or None
+        self._lookup_method = lookup_method
         # Genome-keyed cache: pymoo dedups offspring within a generation but
         # re-samples across generations, and every re-evaluation costs a full
         # proxy training. Budget and method set are constant within a run, so
@@ -270,12 +277,14 @@ class NAS(Problem):
                     # gets the objective penalty like a failed live query.
                     arch_str = nb201_encoding.decode(genome).arch_str
                     _lut = self._nap2_lookup.get(arch_str)
-                    performance['pred_acc'] = float(_lut) if _lut is not None else None
+                    _val = float(_lut) if _lut is not None else None
+                    if self._lookup_method == 'nap2':
+                        performance['pred_acc'] = _val
                     fs = dict(performance.get('fitness_scores') or {})
-                    fs['nap2'] = performance['pred_acc']
+                    fs[self._lookup_method] = _val
                     performance['fitness_scores'] = fs
-                    logging.info('nap2 pred_acc = %s (lookup table)',
-                                 'n/a' if _lut is None else '%.4f' % _lut)
+                    logging.info('%s score = %s (lookup table)', self._lookup_method,
+                                 'n/a' if _lut is None else '%.6f' % _lut)
                 # Guided mode: don't cache a result whose guiding score
                 # failed — caching it would turn a transient failure (OOM,
                 # predictor exception) into a permanent penalty against that
@@ -529,6 +538,10 @@ def main():
 
     wants_nap2 = args.use_nap2 or 'nap2' in expanded
     baseline_names = [t for t in expanded if t != 'nap2']
+    if args.nap2_lookup and args.lookup_method != 'nap2':
+        # The table replaces live scoring of that method: never build its scorer
+        # (no partial training / zero-cost pass, no lc_pfn checkpoint needed).
+        baseline_names = [t for t in baseline_names if t != args.lookup_method]
 
     # lce_m/lc_pfn extrapolation horizon: --lc_target_epochs, else --epochs,
     # else 20 (the project GT horizon) — --epochs 0 guided runs must not
@@ -571,8 +584,8 @@ def main():
             raise ValueError('--nap2_lookup is keyed by NB-201 arch strings (nb201 only)')
         with open(args.nap2_lookup) as f:
             nap2_lookup = {k: v for k, v in json.load(f).items() if not k.startswith('_')}
-        logging.info('nap2_lookup = %s (%d architectures; live nap2 disabled)',
-                     args.nap2_lookup, len(nap2_lookup))
+        logging.info('nap2_lookup = %s (%d architectures; method %s; live scoring disabled)',
+                     args.nap2_lookup, len(nap2_lookup), args.lookup_method)
         wants_nap2 = False
 
     predictor = None
@@ -629,7 +642,7 @@ def main():
                   fitness_objective=args.fitness_objective,
                   lc_cadence=args.lc_cadence,
                   lc_epoch_cap=args.lc_epoch_cap,
-                  nap2_lookup=nap2_lookup)
+                  nap2_lookup=nap2_lookup, lookup_method=args.lookup_method)
 
     # configure the nsga-net method
     method = engine.nsganet(pop_size=args.pop_size,
