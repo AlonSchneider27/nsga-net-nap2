@@ -42,6 +42,16 @@ DATASET_CONFIGS: Dict[str, Dict[str, Any]] = {
         'data_dir': 'data/ImageNet16',
         'loader_module': 'search.imagenet16_search',
         'loader_class': 'ImageNet16',
+    },    'spherical_cifar100': {
+        # NAS-Bench-360 spherical projection of CIFAR-100 (60x60, 100 classes);
+        # used as-is, no normalization (NB360 protocol). Needs --data <dir with s2_cifar100.gz>.
+        'num_classes': 100,
+        'image_size': (60, 60),
+        'mean': None,
+        'std':  None,
+        'data_dir': 'data/spherical_cifar100',
+        'loader_module': 'search.spherical_cifar100_search',
+        'loader_class': 'SphericalCIFAR100',
     },
 }
 

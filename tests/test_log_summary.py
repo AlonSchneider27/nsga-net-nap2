@@ -308,3 +308,55 @@ def test_scrape_budget_suffixed_fitness_keys(tmp_path):
         "nap2@1": 0.8123, "nap2@5": 0.8412,
         "synflow": 1.5e+30,
     }
+
+
+OBJECTIVE_LINE = ("05/06 08:35:00 PM objective_method = sotl_e "
+                  "(objs[0] = -score at budget 5; flops objective unchanged)\n")
+
+
+def test_scrape_objective_method(tmp_path):
+    log = tmp_path / "log.txt"
+    log.write_text(OBJECTIVE_LINE + BUDGET_FITNESS_LINES)
+    from misc.log_summary import scrape_objective_method
+    assert scrape_objective_method(log) == "sotl_e"
+
+
+def test_scrape_objective_method_absent(tmp_path):
+    log = tmp_path / "log.txt"
+    log.write_text(BUDGET_FITNESS_LINES)
+    from misc.log_summary import scrape_objective_method, write_summary
+    assert scrape_objective_method(log) is None
+    payload = write_summary(log, tmp_path / "s.json")
+    assert "objective_method" not in payload
+
+
+def test_write_summary_includes_objective_method(tmp_path):
+    log = tmp_path / "log.txt"
+    log.write_text(OBJECTIVE_LINE + BUDGET_FITNESS_LINES)
+    from misc.log_summary import write_summary
+    payload = write_summary(log, tmp_path / "s.json")
+    assert payload["objective_method"] == "sotl_e"
+
+
+def test_write_summary_tolerates_bad_bytes_in_log(tmp_path):
+    # Real search logs can contain stray non-UTF-8 bytes; the objective
+    # scrape must not kill the whole summary (regression guard).
+    log = tmp_path / "log.txt"
+    log.write_bytes(b"\xff\xfe garbage line\n"
+                    + OBJECTIVE_LINE.encode()
+                    + BUDGET_FITNESS_LINES.encode())
+    from misc.log_summary import write_summary
+    payload = write_summary(log, tmp_path / "s.json")
+    assert payload["objective_method"] == "sotl_e"
+    assert len(payload["architectures"]) == 1
+
+
+def test_scrape_epoch_native_keys(tmp_path):
+    log = tmp_path / "log.txt"
+    log.write_text(BUDGET_FITNESS_LINES.replace(
+        "sotl@1=-32.100000 sotl@5=-123.456000",
+        "sotl@e1=-32.100000 sotl_e@e20=-3.500000"))
+    from misc.log_summary import scrape
+    fit = scrape(log)["1"]["fitness"]
+    assert fit["sotl@e1"] == -32.1
+    assert fit["sotl_e@e20"] == -3.5
